@@ -10,9 +10,9 @@ st.set_page_config(
     layout="wide"
 )
 
-BASE = Path("/content/drive/MyDrive/UrbanEV_Project")
-RESULTS = BASE / "urbanev_results"
-DATASETS = BASE / "datasets"
+BASE = Path(__file__).resolve().parent
+RESULTS = BASE
+DATASETS = BASE
 
 st.title("🔋 UrbanEV Intelligent Decision-Support System")
 st.caption(
@@ -22,10 +22,10 @@ st.caption(
 
 @st.cache_data
 def load_data():
-    decision_path = RESULTS / "intelligent_decision_support.csv"
-    pricing_path = RESULTS / "dynamic_pricing_simulation.csv"
-    zones_path = DATASETS / "zone-information.csv"
-    shap_path = RESULTS / "shap_feature_importance.csv"
+    decision_path = BASE / "intelligent_decision_support.csv"
+    pricing_path = BASE / "dynamic_pricing_simulation.csv"
+    zones_path = BASE / "zone-information.csv"
+    shap_path = BASE / "shap_feature_importance.csv"
 
     decision = pd.read_csv(decision_path) if decision_path.exists() else None
     pricing = pd.read_csv(pricing_path) if pricing_path.exists() else None
