@@ -21,11 +21,11 @@ BASE = Path(__file__).resolve().parent
 # 2. TITLE
 # =========================================================
 
-st.title("🔋 UrbanEV Intelligent Decision-Support System")
+st.title("UrbanEV Intelligent Decision-Support System")
 
 st.caption(
-    "Predictive congestion monitoring and dynamic pricing "
-    "for electric vehicle charging networks"
+    "Predictive Congestion Modeling and Dynamic Pricing "
+    "Optimization for Electric Vehicle Charging Networks"
 )
 
 
@@ -36,94 +36,133 @@ st.caption(
 @st.cache_data
 def load_data():
 
-    decision_path = BASE / "intelligent_decision_support.csv"
-    pricing_path = BASE / "dynamic_pricing_simulation.csv"
-    zones_path = BASE / "zone-information.csv"
-    shap_path = BASE / "shap_feature_importance.csv"
+    files = {
+        "decision": "intelligent_decision_support.csv",
+        "pricing": "dynamic_pricing_simulation.csv",
+        "zones": "zone-information.csv",
+        "shap": "shap_feature_importance.csv"
+    }
 
-    decision = (
-        pd.read_csv(decision_path)
-        if decision_path.exists()
-        else None
-    )
+    loaded = {}
 
-    pricing = (
-        pd.read_csv(pricing_path)
-        if pricing_path.exists()
-        else None
-    )
+    for key, filename in files.items():
 
-    zones = (
-        pd.read_csv(zones_path)
-        if zones_path.exists()
-        else None
-    )
+        path = BASE / filename
 
-    shap = (
-        pd.read_csv(shap_path)
-        if shap_path.exists()
-        else None
-    )
+        if path.exists():
+            loaded[key] = pd.read_csv(path)
+        else:
+            loaded[key] = None
 
-    return decision, pricing, zones, shap
+    return loaded
 
 
 try:
-    decision, pricing, zones, shap = load_data()
+    data = load_data()
 
 except Exception as e:
-    st.error(f"Unable to load project results: {e}")
+    st.error(f"Error loading project data: {e}")
     st.stop()
+
+
+decision = data["decision"]
+pricing = data["pricing"]
+zones = data["zones"]
+shap_data = data["shap"]
 
 
 if decision is None and pricing is None:
+
     st.error(
-        "Neither decision-support nor pricing results were found. "
-        "Check that the CSV files are in the same folder as app.py."
+        "Decision-support data was not found. "
+        "Please check that the CSV files are in the same "
+        "folder as app.py."
     )
+
     st.stop()
 
 
 # =========================================================
-# 4. PREPARE DECISION-SUPPORT DATA
+# 4. PREPARE MAIN DATASET
 # =========================================================
 
-df = decision.copy() if decision is not None else pricing.copy()
+df = (
+    decision.copy()
+    if decision is not None
+    else pricing.copy()
+)
+
+df.columns = df.columns.astype(str).str.strip()
+
 
 if "time" in df.columns:
+
     df["time"] = pd.to_datetime(
         df["time"],
         errors="coerce"
     )
 
+
 if "zone_id" in df.columns:
+
     df["zone_id"] = pd.to_numeric(
         df["zone_id"],
         errors="coerce"
     )
 
 
+# Convert numerical columns when available.
+
+numeric_columns = [
+    "occupancy",
+    "predicted_congestion_probability",
+    "congestion_probability",
+    "service_price",
+    "dynamic_price",
+    "price_increase_pct",
+    "risk_priority",
+    "congestion_probability_pct"
+]
+
+for col in numeric_columns:
+
+    if col in df.columns:
+
+        df[col] = pd.to_numeric(
+            df[col],
+            errors="coerce"
+        )
+
+
 # =========================================================
 # 5. SIDEBAR FILTERS
 # =========================================================
 
-st.sidebar.header("Dashboard Filters")
+st.sidebar.title("Dashboard Filters")
+
+
+# Date filter
 
 if "time" in df.columns and df["time"].notna().any():
 
-    valid_dates = df["time"].dropna()
+    valid_times = df["time"].dropna()
 
-    date_range = st.sidebar.date_input(
+    min_date = valid_times.min().date()
+    max_date = valid_times.max().date()
+
+    selected_dates = st.sidebar.date_input(
         "Select date range",
-        value=(
-            valid_dates.min().date(),
-            valid_dates.max().date()
-        )
+        value=(min_date, max_date),
+        min_value=min_date,
+        max_value=max_date
     )
 
-    if isinstance(date_range, (tuple, list)) and len(date_range) == 2:
+    if (
+        isinstance(selected_dates, (tuple, list))
+        and len(selected_dates) == 2
+    ):
 
-        start_date, end_date = date_range
+        start_date, end_date = selected_dates
 
         df = df[
             df["time"].dt.date.between(
@@ -133,66 +172,131 @@ if "time" in df.columns and df["time"].notna().any():
         ].copy()
 
 
+# Zone filter
+
 selected_zones = []
 
 if "zone_id" in df.columns:
 
-    zone_values = sorted(
+    available_zones = sorted(
         df["zone_id"].dropna().unique().tolist()
     )
 
     selected_zones = st.sidebar.multiselect(
         "Select charging zones",
-        options=zone_values,
+        options=available_zones,
         default=[]
     )
 
     if selected_zones:
+
         df = df[
             df["zone_id"].isin(selected_zones)
         ].copy()
+
+
+if df.empty:
+
+    st.warning(
+        "No records match the selected filters. "
+        "Please change the date range or zone selection."
+    )
+
+    st.stop()
 
 
 # =========================================================
 # 6. NETWORK OVERVIEW
 # =========================================================
 
-st.subheader("Network Overview")
+st.header("Network Overview")
 
-c1, c2, c3, c4 = st.columns(4)
+col1, col2, col3, col4 = st.columns(4)
 
-c1.metric(
-    "Records",
+
+# Total records
+
+col1.metric(
+    "Total Records",
     f"{len(df):,}"
 )
+
+
+# Number of zones
+
+if "zone_id" in df.columns:
+
+    col2.metric(
+        "Charging Zones",
+        f"{df['zone_id'].nunique():,}"
+    )
+
+else:
+
+    col2.metric(
+        "Charging Zones",
+        "N/A"
+    )
 
 
 # Average occupancy
 
 if "occupancy" in df.columns:
 
-    occupancy_values = pd.to_numeric(
-        df["occupancy"],
-        errors="coerce"
-    )
+    average_occupancy = df["occupancy"].mean()
 
-    c2.metric(
-        "Average occupancy",
-        f"{occupancy_values.mean():.2f}"
+    col3.metric(
+        "Average Occupancy",
+        (
+            f"{average_occupancy:.2f}"
+            if pd.notna(average_occupancy)
+            else "N/A"
+        )
     )
 
 else:
-    c2.metric(
-        "Average occupancy",
+
+    col3.metric(
+        "Average Occupancy",
         "N/A"
     )
 
 
-# Predicted congestion probability
+# Time coverage
+
+if "time" in df.columns:
+
+    timestamps = df["time"].nunique()
+
+    col4.metric(
+        "Time Points",
+        f"{timestamps:,}"
+    )
+
+else:
+
+    col4.metric(
+        "Time Points",
+        "N/A"
+    )
+
+
+st.divider()
+
+
+# =========================================================
+# 7. CONGESTION RISK ANALYSIS
+# =========================================================
+
+st.header("Congestion Risk Analysis")
+
+
+# Determine the probability column.
 
 prob_col = next(
     (
-        col for col in [
+        col
+        for col in [
             "predicted_congestion_probability",
             "congestion_probability"
         ]
@@ -201,7 +305,9 @@ prob_col = next(
     None
 )
 
+
 probability_pct = None
+
 
 if prob_col is not None:
 
@@ -210,97 +316,59 @@ if prob_col is not None:
         errors="coerce"
     )
 
+    # The model output is normally a fraction between 0 and 1.
+    # Convert it to a percentage for display.
+
     if probability.notna().any():
 
-        # Convert fractional probabilities into percentages.
-        # Example: 0.25 becomes 25%.
-
         if probability.max() <= 1:
+
             probability_pct = probability * 100
+
         else:
+
             probability_pct = probability
 
-        c3.metric(
-            "Mean predicted congestion risk",
-            f"{probability_pct.mean():.2f}%"
+        df["risk_percentage"] = probability_pct
+
+else:
+
+    # Use the existing percentage column if available.
+
+    if "congestion_probability_pct" in df.columns:
+
+        df["risk_percentage"] = pd.to_numeric(
+            df["congestion_probability_pct"],
+            errors="coerce"
         )
+
+        probability_pct = df["risk_percentage"]
+
+
+# Risk classification
+
+def classify_risk(value):
+
+    if pd.isna(value):
+        return "Unknown"
+
+    if value < 20:
+        return "Low"
+
+    elif value < 40:
+        return "Moderate"
+
+    elif value < 60:
+        return "High"
 
     else:
-        c3.metric(
-            "Mean predicted congestion risk",
-            "N/A"
-        )
+        return "Very High"
 
-else:
-    c3.metric(
-        "Mean predicted congestion risk",
-        "N/A"
-    )
-
-
-# Average recommended price
-
-price_col = next(
-    (
-        col for col in [
-            "dynamic_price",
-            "recommended_price",
-            "recommended_service_price"
-        ]
-        if col in df.columns
-    ),
-    None
-)
-
-if price_col is not None:
-
-    price_values = pd.to_numeric(
-        df[price_col],
-        errors="coerce"
-    )
-
-    c4.metric(
-        "Average recommended price",
-        f"{price_values.mean():.3f}"
-    )
-
-else:
-    c4.metric(
-        "Average recommended price",
-        "N/A"
-    )
-
-
-# =========================================================
-# 7. CONGESTION RISK ANALYSIS
-# =========================================================
-
-st.subheader("Congestion Risk Analysis")
 
 if probability_pct is not None:
 
-    df["risk_percentage"] = probability_pct
-
-    def risk_label(probability):
-
-        if pd.isna(probability):
-            return "Unknown"
-
-        if probability < 20:
-            return "Low"
-
-        elif probability < 40:
-            return "Moderate"
-
-        elif probability < 60:
-            return "High"
-
-        else:
-            return "Very High"
-
-
     df["risk_category_display"] = (
-        df["risk_percentage"].apply(risk_label)
+        df["risk_percentage"].apply(classify_risk)
     )
 
     risk_order = [
@@ -313,44 +381,89 @@ if probability_pct is not None:
     risk_counts = (
         df["risk_category_display"]
         .value_counts()
-        .reindex(
-            risk_order,
-            fill_value=0
+        .reindex(risk_order, fill_value=0)
+    )
+
+
+    # Risk metrics
+
+    risk_col1, risk_col2, risk_col3 = st.columns(3)
+
+    risk_col1.metric(
+        "Average Congestion Probability",
+        f"{df['risk_percentage'].mean():.2f}%"
+    )
+
+    high_risk_records = df[
+        df["risk_category_display"].isin(
+            ["High", "Very High"]
         )
+    ]
+
+    risk_col2.metric(
+        "High-Risk Records",
+        f"{len(high_risk_records):,}"
     )
 
-    st.write(
-        "Distribution of records by predicted congestion-risk category"
+    if "zone_id" in high_risk_records.columns:
+
+        high_risk_zones = (
+            high_risk_records["zone_id"].nunique()
+        )
+
+    else:
+
+        high_risk_zones = len(high_risk_records)
+
+    risk_col3.metric(
+        "Zones Requiring Attention",
+        f"{high_risk_zones:,}"
     )
 
-    st.bar_chart(risk_counts)
+
+    # Risk distribution chart
+
+    chart_col, summary_col = st.columns(
+        [2, 1]
+    )
+
+    with chart_col:
+
+        st.subheader("Congestion Risk Distribution")
+
+        st.bar_chart(risk_counts)
+
+
+    with summary_col:
+
+        st.subheader("Risk Summary")
+
+        risk_summary = pd.DataFrame({
+            "Risk Category": risk_order,
+            "Number of Records": [
+                int(risk_counts[category])
+                for category in risk_order
+            ]
+        })
+
+        st.dataframe(
+            risk_summary,
+            use_container_width=True,
+            hide_index=True
+        )
 
 
     # Records requiring attention
 
-    attention = df[
-        df["risk_category_display"].isin(
-            ["High", "Very High"]
-        )
-    ].copy()
+    st.subheader("High-Risk Charging Records")
 
-    if "zone_id" in attention.columns:
-        attention_count = attention["zone_id"].nunique()
-    else:
-        attention_count = len(attention)
+    if not high_risk_records.empty:
 
-    st.write(
-        f"**Zones requiring attention:** {attention_count:,}"
-    )
-
-
-    if not attention.empty:
-
-        preferred_columns = [
+        display_columns = [
             "time",
             "zone_id",
             "occupancy",
-            prob_col,
+            "predicted_congestion_probability",
             "congestion_risk",
             "risk_category_display",
             "service_price",
@@ -361,161 +474,306 @@ if probability_pct is not None:
             "risk_priority"
         ]
 
-        visible_columns = [
-            col for col in preferred_columns
-            if col in attention.columns
+        available_columns = [
+            col
+            for col in display_columns
+            if col in high_risk_records.columns
         ]
 
-        attention_display = attention[
-            visible_columns
+        high_risk_display = high_risk_records[
+            available_columns
         ].copy()
 
-        attention_display = attention_display.sort_values(
+        high_risk_display = high_risk_display.sort_values(
             "risk_percentage",
             ascending=False
         )
 
-        st.write("Records requiring attention")
-
         st.dataframe(
-            attention_display,
+            high_risk_display,
             use_container_width=True,
             height=350,
             hide_index=True
         )
 
     else:
+
         st.info(
             "No records fall into the High or Very High "
-            "categories for the selected filters."
+            "categories under the selected filters."
         )
+
+
+    st.caption(
+        "Risk categories use probability thresholds: "
+        "Low <20%, Moderate 20–<40%, "
+        "High 40–<60%, and Very High ≥60%."
+    )
+
 
 else:
 
     st.warning(
-        "Congestion-risk analysis is unavailable because "
-        "a probability column was not found."
+        "Congestion probability was not found. "
+        "Please check the probability columns in the dataset."
     )
 
 
+st.divider()
+
+
 # =========================================================
-# 8. DYNAMIC PRICING ANALYSIS
+# 8. DYNAMIC PRICING
 # =========================================================
 
-st.subheader("Dynamic Pricing")
+st.header("Dynamic Pricing")
+
 
 if (
-    price_col is not None
-    and "time" in df.columns
+    "service_price" in df.columns
+    and "dynamic_price" in df.columns
 ):
 
-    price_trend = df.dropna(
-        subset=["time"]
-    ).copy()
-
-    price_trend[price_col] = pd.to_numeric(
-        price_trend[price_col],
+    df["service_price"] = pd.to_numeric(
+        df["service_price"],
         errors="coerce"
     )
 
-    price_trend = price_trend.dropna(
-        subset=[price_col]
+    df["dynamic_price"] = pd.to_numeric(
+        df["dynamic_price"],
+        errors="coerce"
     )
 
-    if not price_trend.empty:
 
-        price_trend["date"] = (
-            price_trend["time"].dt.floor("D")
+    # Price summary metrics
+
+    price_col1, price_col2, price_col3 = st.columns(3)
+
+    current_price = df["service_price"].mean()
+    recommended_price = df["dynamic_price"].mean()
+
+    price_col1.metric(
+        "Average Service Price",
+        (
+            f"{current_price:.3f}"
+            if pd.notna(current_price)
+            else "N/A"
+        )
+    )
+
+    price_col2.metric(
+        "Average Dynamic Price",
+        (
+            f"{recommended_price:.3f}"
+            if pd.notna(recommended_price)
+            else "N/A"
+        )
+    )
+
+
+    if "price_increase_pct" in df.columns:
+
+        df["price_increase_pct"] = pd.to_numeric(
+            df["price_increase_pct"],
+            errors="coerce"
         )
 
-        daily_price = (
-            price_trend
-            .groupby("date")[price_col]
-            .mean()
+        average_adjustment = (
+            df["price_increase_pct"].mean()
         )
 
-        st.write("Average recommended price over time")
-
-        st.line_chart(daily_price)
+        price_col3.metric(
+            "Average Price Adjustment",
+            (
+                f"{average_adjustment:.2f}%"
+                if pd.notna(average_adjustment)
+                else "N/A"
+            )
+        )
 
     else:
-        st.info(
-            "No valid price records are available "
-            "for the selected filters."
+
+        price_col3.metric(
+            "Average Price Adjustment",
+            "N/A"
         )
 
 
-if "price_increase_pct" in df.columns:
+    # Compare current and dynamic prices
 
-    price_increase = pd.to_numeric(
-        df["price_increase_pct"],
-        errors="coerce"
-    ).dropna()
+    st.subheader("Service Price vs Dynamic Price")
 
-    if not price_increase.empty:
+    price_comparison = pd.DataFrame({
+        "Price Type": [
+            "Service Price",
+            "Dynamic Price"
+        ],
+        "Average Price": [
+            current_price,
+            recommended_price
+        ]
+    })
 
-        st.write("Price adjustment distribution")
+    st.bar_chart(
+        price_comparison.set_index("Price Type")
+    )
 
-        adjustment_counts = (
-            price_increase
+
+    # Price trend over time
+
+    if "time" in df.columns:
+
+        st.subheader("Dynamic Pricing Trend")
+
+        price_trend = df[
+            ["time", "service_price", "dynamic_price"]
+        ].dropna(
+            subset=["time"]
+        ).copy()
+
+        if not price_trend.empty:
+
+            daily_prices = (
+                price_trend
+                .set_index("time")
+                .resample("D")[
+                    ["service_price", "dynamic_price"]
+                ]
+                .mean()
+                .dropna(how="all")
+            )
+
+            if not daily_prices.empty:
+
+                st.line_chart(daily_prices)
+
+            else:
+
+                st.info(
+                    "No daily price trends are available."
+                )
+
+
+    # Price adjustment distribution
+
+    if "price_increase_pct" in df.columns:
+
+        st.subheader("Price Adjustment Distribution")
+
+        adjustment_data = df[
+            "price_increase_pct"
+        ].dropna()
+
+        if not adjustment_data.empty:
+
+            adjustment_counts = (
+                adjustment_data
+                .round(2)
+                .value_counts()
+                .sort_index()
+            )
+
+            st.bar_chart(adjustment_counts)
+
+        else:
+
+            st.info(
+                "No price adjustment data is available."
+            )
+
+
+    # Recommended actions
+
+    if "recommended_action" in df.columns:
+
+        st.subheader("Recommended Operational Actions")
+
+        action_counts = (
+            df["recommended_action"]
+            .fillna("Not specified")
             .value_counts()
-            .sort_index()
         )
 
-        st.bar_chart(adjustment_counts)
+        st.bar_chart(action_counts)
+
+        st.dataframe(
+            df[
+                [
+                    col
+                    for col in [
+                        "time",
+                        "zone_id",
+                        "congestion_risk",
+                        "service_price",
+                        "dynamic_price",
+                        "price_increase_pct",
+                        "recommended_action",
+                        "operational_response"
+                    ]
+                    if col in df.columns
+                ]
+            ].head(100),
+            use_container_width=True,
+            hide_index=True
+        )
+
+
+else:
+
+    st.warning(
+        "Dynamic pricing requires service_price and dynamic_price "
+        "columns. Check that the correct decision-support CSV "
+        "has been loaded."
+    )
+
+
+st.divider()
 
 
 # =========================================================
 # 9. CHARGING ZONE INFORMATION AND MAP
 # =========================================================
 
-st.subheader("Charging Zone Information")
+st.header("Charging Zone Information")
 
 if zones is not None and not zones.empty:
 
-    # Work on a copy so the original data remains unchanged.
     zone_view = zones.copy()
 
-    # Remove accidental spaces from column names.
     zone_view.columns = (
         zone_view.columns.astype(str).str.strip()
     )
 
-    # Clean the zone identifier.
-    if "TAZID" in zone_view.columns:
+
+    # Check the required zone identifier.
+
+    if "TAZID" not in zone_view.columns:
+
+        st.error(
+            "TAZID was not found in zone-information.csv."
+        )
+
+    else:
 
         zone_view["TAZID"] = pd.to_numeric(
             zone_view["TAZID"],
             errors="coerce"
         )
 
-        # Remove rows that do not have a usable zone ID.
         zone_view = zone_view.dropna(
             subset=["TAZID"]
         ).copy()
 
-    else:
 
-        st.error(
-            "The zone-information file does not contain "
-            "the required TAZID column."
-        )
+        # Convert numeric fields.
 
-        zone_view = pd.DataFrame()
-
-
-    if not zone_view.empty:
-
-        # Clean coordinate and numeric columns.
-        numeric_zone_columns = [
+        for col in [
             "longitude",
             "latitude",
             "charge_count",
             "area",
             "perimeter"
-        ]
-
-        for col in numeric_zone_columns:
+        ]:
 
             if col in zone_view.columns:
 
@@ -525,9 +783,7 @@ if zones is not None and not zones.empty:
                 )
 
 
-        # Match selected decision-support zones to metadata.
-        # The decision dataset uses zone_id.
-        # The zone-information dataset uses TAZID.
+        # Filter metadata to selected zones if applicable.
 
         if selected_zones:
 
@@ -542,11 +798,13 @@ if zones is not None and not zones.empty:
 
 
         st.write(
-            f"**Charging zones displayed:** {len(zone_view):,}"
+            f"**Charging zones displayed:** "
+            f"{len(zone_view):,}"
         )
 
 
-        # Display zone metadata.
+        # Zone metadata table.
+
         st.dataframe(
             zone_view,
             use_container_width=True,
@@ -555,10 +813,11 @@ if zones is not None and not zones.empty:
         )
 
 
-        # Display map when coordinates are available.
+        # Map.
+
         if (
-            "longitude" in zone_view.columns
-            and "latitude" in zone_view.columns
+            "latitude" in zone_view.columns
+            and "longitude" in zone_view.columns
         ):
 
             map_data = zone_view[
@@ -574,7 +833,6 @@ if zones is not None and not zones.empty:
                 subset=["latitude", "longitude"]
             )
 
-            # Keep only valid geographic coordinates.
             map_data = map_data[
                 map_data["latitude"].between(-90, 90)
                 & map_data["longitude"].between(-180, 180)
@@ -582,131 +840,156 @@ if zones is not None and not zones.empty:
 
             if not map_data.empty:
 
-                st.write("### Charging Zone Locations")
+                st.subheader("Charging Zone Locations")
 
                 st.map(map_data)
+
+                st.caption(
+                    "Map displays charging-zone locations "
+                    "using the available latitude and longitude data."
+                )
 
             else:
 
                 st.warning(
-                    "No valid latitude and longitude values "
-                    "are available for the selected zones."
+                    "No valid coordinates were found for "
+                    "the selected charging zones."
                 )
 
         else:
 
             st.warning(
-                "The zone-information file does not contain "
-                "both longitude and latitude columns."
+                "Latitude and longitude columns are missing."
             )
-
-
-    else:
-
-        st.warning(
-            "No valid charging-zone metadata is available."
-        )
 
 else:
 
     st.warning(
-        "Zone-information data could not be loaded. "
-        "Check that zone-information.csv is in the same "
-        "folder as app.py."
+        "Zone information is unavailable. Check that "
+        "zone-information.csv is in the same folder as app.py."
     )
 
 
+st.divider()
+
+
 # =========================================================
-# 10. MODEL EXPLAINABILITY (SHAP)
+# 10. MODEL EXPLAINABILITY
 # =========================================================
 
-st.subheader("Model Explainability (SHAP)")
+st.header("Model Explainability (SHAP)")
 
-if shap is not None and not shap.empty:
 
-    st.write("Feature-importance results")
+if shap_data is not None and not shap_data.empty:
+
+    shap_view = shap_data.copy()
+
+    shap_view.columns = (
+        shap_view.columns.astype(str).str.strip()
+    )
+
+    st.subheader("Feature Importance Results")
 
     st.dataframe(
-        shap,
+        shap_view,
         use_container_width=True,
         hide_index=True
     )
 
-    numeric_columns = shap.select_dtypes(
-        include=np.number
-    ).columns.tolist()
 
-    feature_column = next(
+    # Identify feature and importance columns.
+
+    feature_col = next(
         (
-            col for col in shap.columns
+            col
+            for col in shap_view.columns
             if "feature" in col.lower()
         ),
-        shap.columns[0] if len(shap.columns) else None
+        None
     )
 
-    importance_column = next(
+    numeric_shap_columns = (
+        shap_view.select_dtypes(
+            include=np.number
+        ).columns.tolist()
+    )
+
+    importance_col = next(
         (
-            col for col in numeric_columns
+            col
+            for col in numeric_shap_columns
             if (
                 "importance" in col.lower()
                 or "shap" in col.lower()
             )
         ),
-        numeric_columns[0] if numeric_columns else None
+        None
     )
 
-    if feature_column and importance_column:
 
-        plot_data = shap[
-            [feature_column, importance_column]
-        ].copy()
+    if (
+        feature_col is not None
+        and importance_col is not None
+    ):
 
-        plot_data[importance_column] = pd.to_numeric(
-            plot_data[importance_column],
+        shap_view[importance_col] = pd.to_numeric(
+            shap_view[importance_col],
             errors="coerce"
         )
 
-        plot_data = plot_data.dropna()
+        shap_plot = shap_view[
+            [feature_col, importance_col]
+        ].dropna().copy()
 
-        plot_data = plot_data.sort_values(
-            importance_column,
+        shap_plot = shap_plot.sort_values(
+            importance_col,
             ascending=False
         ).head(15)
 
-        if not plot_data.empty:
+        if not shap_plot.empty:
 
-            st.write("Top 15 important features")
+            st.subheader("Top 15 Important Features")
 
             st.bar_chart(
-                plot_data.set_index(feature_column)
+                shap_plot.set_index(feature_col)
             )
 
         else:
 
             st.info(
-                "No valid numerical feature-importance "
-                "values are available."
+                "No valid feature-importance values "
+                "are available to plot."
             )
+
+    else:
+
+        st.info(
+            "The SHAP file does not contain clearly identifiable "
+            "feature and numerical importance columns."
+        )
 
 else:
 
     st.info(
-        "SHAP feature-importance data is not available."
+        "SHAP feature-importance results are unavailable."
     )
 
 
+st.divider()
+
+
 # =========================================================
-# 11. EXPORT FILTERED RESULTS
+# 11. EXPORT DATA
 # =========================================================
 
-st.subheader("Export Results")
+st.header("Export Results")
 
 csv_data = df.to_csv(
     index=False
 ).encode("utf-8")
 
 st.download_button(
-    label="Download filtered decision-support data",
+    label="Download Filtered Decision-Support Data",
     data=csv_data,
     file_name="urbanev_decision_support_filtered.csv",
     mime="text/csv"
@@ -714,12 +997,18 @@ st.download_button(
 
 
 # =========================================================
-# 12. DISCLAIMER
+# 12. FOOTER
 # =========================================================
 
-st.info(
-    "Pricing recommendations are simulation-based. "
-    "They should be validated against driver response and "
-    "operational constraints before being used in a live "
-    "charging network."
+st.caption(
+    "UrbanEV Decision Support | Predictive Congestion Modeling "
+    "and Dynamic Pricing Optimization"
 )
+
+st.info(
+    "Dynamic pricing results are simulation-based recommendations. "
+    "They should be validated against operational constraints "
+    "and real-world driver responses before deployment."
+)
+    
+  
