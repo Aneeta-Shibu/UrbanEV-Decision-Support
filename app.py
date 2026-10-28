@@ -152,7 +152,6 @@ if probability_pct is not None:
     ].copy()
 
     st.write(f"**Zones requiring attention:** {attention['zone_id'].nunique() if 'zone_id' in attention.columns else len(attention):,}")
-
     if not attention.empty:
         preferred = [
             "time", "zone_id", "occupancy", prob_col,
@@ -160,15 +159,20 @@ if probability_pct is not None:
             "dynamic_price", "price_change", "price_increase_pct",
             "recommended_action"
         ]
+
         visible = [c for c in preferred if c in attention.columns]
+
+        attention_display = attention[visible].copy()
+        attention_display["risk_percentage"] = attention["risk_percentage"]
+
         st.dataframe(
-            attention[visible].sort_values(
+            attention_display.sort_values(
                 "risk_percentage", ascending=False
             ),
             use_container_width=True,
             height=350
         )
-
+    
 # Pricing analysis
 st.subheader("Dynamic Pricing")
 
