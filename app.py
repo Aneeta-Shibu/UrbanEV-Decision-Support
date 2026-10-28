@@ -1,236 +1,128 @@
 
-import streamlit as st
-import pandas as pd
-import numpy as np
-from pathlib import Path
+section("📊 Network overview", "A quick summary of the currently selected records.")
+avg_occupancy = pd.to_numeric(df[occupancy_col], errors="coerce").mean() if occupancy_col else np.nan
+avg_risk = probability_pct.mean() if probability_pct is not None else np.nan
+avg_price = pd.to_numeric(df[price_col], errors="coerce").mean() if price_col else np.nan
+high_count = int(df["risk_category_display"].isin(["High", "Very High"]).sum()) if "risk_category_display" in df.columns else 0
 
-st.set_page_config(
-    page_title="UrbanEV Decision Support",
-    page_icon="🔋",
-    layout="wide"
-)
+m1, m2, m3, m4 = st.columns(4)
+metric_card(m1, "📈 Average occupancy", f"{avg_occupancy:.2f}" if pd.notna(avg_occupancy) else "N/A",
+            "Average occupancy in selected records", "card-blue")
+metric_card(m2, "🚦 Average congestion risk", f"{avg_risk:.2f}%" if pd.notna(avg_risk) else "N/A",
+            "Model-estimated risk, not a guarantee", "card-orange")
+metric_card(m3, "⚠️ High-risk records", f"{high_count:,}",
+            "Records labelled High or Very High", "card-purple")
+metric_card(m4, "💰 Recommended price", f"{avg_price:.3f}" if pd.notna(avg_price) else "N/A",
+            "Average price in dataset units", "card-green")
+st.caption(f"Showing **{len(df):,} records** after applying your selected filters.")
 
-BASE = Path(__file__).resolve().parent
-RESULTS = BASE
-DATASETS = BASE
+overview_tab, alerts_tab, pricing_tab, zones_tab, technical_tab = st.tabs([
+    "🏠 Overview", "🚦 Congestion alerts", "💰 Dynamic pricing", "📍 Charging zones", "🧠 Technical analysis"
+])
 
-st.title("🔋 UrbanEV Intelligent Decision-Support System")
-st.caption(
-    "Predictive congestion monitoring and dynamic pricing "
-    "for electric vehicle charging networks"
-)
-
-@st.cache_data
-def load_data():
-    decision_path = BASE / "intelligent_decision_support.csv"
-    pricing_path = BASE / "dynamic_pricing_simulation.csv"
-    zones_path = BASE / "zone-information.csv"
-    shap_path = BASE / "shap_feature_importance.csv"
-
-    decision = pd.read_csv(decision_path) if decision_path.exists() else None
-    pricing = pd.read_csv(pricing_path) if pricing_path.exists() else None
-    zones = pd.read_csv(zones_path) if zones_path.exists() else None
-    shap = pd.read_csv(shap_path) if shap_path.exists() else None
-
-    return decision, pricing, zones, shap
-
-try:
-    decision, pricing, zones, shap = load_data()
-except Exception as e:
-    st.error(f"Unable to load project results: {e}")
-    st.stop()
-
-if decision is None and pricing is None:
-    st.error("Neither decision-support nor pricing results were found.")
-    st.stop()
-
-df = decision.copy() if decision is not None else pricing.copy()
-
-# Parse timestamps where available
-if "time" in df.columns:
-    df["time"] = pd.to_datetime(df["time"], errors="coerce")
-
-# Sidebar filters
-st.sidebar.header("Filters")
-
-if "time" in df.columns and df["time"].notna().any():
-    valid_dates = df["time"].dropna()
-    date_range = st.sidebar.date_input(
-        "Date range",
-        value=(valid_dates.min().date(), valid_dates.max().date())
-    )
-
-    if isinstance(date_range, tuple) and len(date_range) == 2:
-        start_date, end_date = date_range
-        df = df[
-            df["time"].dt.date.between(start_date, end_date)
-        ]
-
-if "zone_id" in df.columns:
-    zone_values = sorted(df["zone_id"].dropna().unique().tolist())
-    selected_zones = st.sidebar.multiselect(
-        "Charging zones",
-        zone_values,
-        default=[]
-    )
-    if selected_zones:
-        df = df[df["zone_id"].isin(selected_zones)]
-
-# Summary metrics
-st.subheader("Network Overview")
-
-c1, c2, c3, c4 = st.columns(4)
-
-c1.metric("Records", f"{len(df):,}")
-
-if "occupancy" in df.columns:
-    c2.metric("Average occupancy", f"{df['occupancy'].mean():.2f}")
-else:
-    c2.metric("Average occupancy", "N/A")
-
-prob_col = next(
-    (c for c in ["predicted_congestion_probability",
-                 "congestion_probability"] if c in df.columns),
-    None
-)
-
-if prob_col:
-    probability = pd.to_numeric(df[prob_col], errors="coerce")
-    # Detect probabilities stored as fractions versus percentages
-    if probability.max() <= 1:
-        probability_pct = probability * 100
+with overview_tab:
+    section("Congestion risk at a glance", "See how records are distributed across risk levels.")
+    if "risk_category_display" in df.columns:
+        order = ["Low", "Moderate", "High", "Very High", "Unknown"]
+        risk_counts = df["risk_category_display"].value_counts().reindex(order, fill_value=0)
+        risk_counts = risk_counts[risk_counts > 0]
+        st.bar_chart(risk_counts, color="#635bdb")
+        rcols = st.columns(4)
+        for col, label, emoji in zip(rcols, ["Low", "Moderate", "High", "Very High"], ["🟢", "🟡", "🟠", "🔴"]):
+            col.metric(f"{emoji} {label}", f"{int((df['risk_category_display'] == label).sum()):,}")
     else:
-        probability_pct = probability
+        st.info("Congestion probability was not found in the loaded data.")
+    st.markdown("""
+    **How to read the risk levels**
+    - 🟢 **Low:** congestion is less likely according to the model.
+    - 🟡 **Moderate:** monitor demand in this zone.
+    - 🟠 **High:** prepare for possible congestion.
+    - 🔴 **Very High:** prioritise this zone for congestion management.
+    """)
 
-    c3.metric("Mean predicted congestion risk",
-              f"{probability_pct.mean():.2f}%")
-else:
-    probability_pct = None
-    c3.metric("Mean predicted congestion risk", "N/A")
+with alerts_tab:
+    section("🚦 Congestion alerts", "Review records flagged by the model for closer attention.")
+    if "risk_category_display" not in df.columns:
+        st.info("Alerts unavailable because the probability field was not found.")
+    else:
+        attention = df[df["risk_category_display"].isin(["High", "Very High"])].copy()
+        if attention.empty:
+            st.success("No High or Very High risk records match the current filters.")
+        else:
+            st.warning(f"{len(attention):,} records are flagged as High or Very High risk.")
+            preferred = ["time", "zone_id", "occupancy", prob_col, "risk_percentage",
+                         "risk_category", "risk_category_display", "dynamic_price",
+                         "price_change", "price_increase_pct", "recommended_action", "operational_response"]
+            visible = [c for c in preferred if c and c in attention.columns]
+            attention = attention.sort_values("risk_percentage", ascending=False)
+            st.dataframe(attention[visible], use_container_width=True, height=390)
+            st.download_button("⬇️ Download congestion alerts", data=attention.to_csv(index=False).encode("utf-8"),
+                file_name="urbanev_congestion_alerts.csv", mime="text/csv")
 
-price_col = next(
-    (c for c in ["dynamic_price", "recommended_price",
-                 "recommended_service_price"] if c in df.columns),
-    None
-)
+with pricing_tab:
+    section("💰 Dynamic pricing", "Review recommended prices over time and the size of price adjustments.")
+    if price_col:
+        price_trend = df.dropna(subset=["time"]).copy() if "time" in df.columns else pd.DataFrame()
+        if not price_trend.empty:
+            price_trend["day"] = price_trend["time"].dt.floor("D")
+            st.markdown("#### Recommended price over time")
+            st.line_chart(price_trend.groupby("day")[price_col].mean(), color="#7c3aed")
+        else:
+            st.info("Time data is unavailable for a price trend.")
+        if "price_increase_pct" in df.columns:
+            adjustment = pd.to_numeric(df["price_increase_pct"], errors="coerce").dropna()
+            if not adjustment.empty:
+                st.markdown("#### Price adjustment distribution")
+                st.bar_chart(adjustment.value_counts().sort_index(), color="#0d9488")
+        if "service_price" in df.columns:
+            current_avg = pd.to_numeric(df["service_price"], errors="coerce").mean()
+            recommended_avg = pd.to_numeric(df[price_col], errors="coerce").mean()
+            p1, p2, p3 = st.columns(3)
+            p1.metric("Average current price", f"{current_avg:.3f}" if pd.notna(current_avg) else "N/A")
+            p2.metric("Average recommended price", f"{recommended_avg:.3f}" if pd.notna(recommended_avg) else "N/A")
+            if pd.notna(current_avg) and current_avg != 0 and pd.notna(recommended_avg):
+                p3.metric("Average price change", f"{((recommended_avg-current_avg)/current_avg*100):+.1f}%")
+            else:
+                p3.metric("Average price change", "N/A")
+        st.caption("Price units follow the source dataset. Recommendations are simulated, not live prices.")
+    else:
+        st.info("A recommended price column was not found.")
 
-if price_col:
-    c4.metric("Average recommended price",
-              f"{pd.to_numeric(df[price_col], errors='coerce').mean():.3f}")
-else:
-    c4.metric("Average recommended price", "N/A")
+with zones_tab:
+    section("📍 Charging zone information", "Explore zone locations and metadata.")
+    if zones is not None:
+        if {"longitude", "latitude"}.issubset(zones.columns):
+            map_data = zones[["latitude", "longitude"]].copy()
+            map_data["latitude"] = pd.to_numeric(map_data["latitude"], errors="coerce")
+            map_data["longitude"] = pd.to_numeric(map_data["longitude"], errors="coerce")
+            map_data = map_data.dropna()
+            if not map_data.empty:
+                st.markdown("#### Charging zone map")
+                st.map(map_data)
+        st.markdown("#### Zone details")
+        st.dataframe(zones, use_container_width=True, height=300)
+    else:
+        st.info("Zone metadata file was not found.")
 
-# Risk classification
-st.subheader("Congestion Risk Analysis")
+with technical_tab:
+    section("🧠 Technical analysis", "Model transparency and feature importance for project evaluation.")
+    st.markdown("#### Model explainability (SHAP)")
+    if shap is not None and not shap.empty:
+        numeric_cols = shap.select_dtypes(include=np.number).columns.tolist()
+        feature_col = next((c for c in shap.columns if "feature" in c.lower()), shap.columns[0] if len(shap.columns) else None)
+        importance_col = next((c for c in numeric_cols if "importance" in c.lower() or "shap" in c.lower()), numeric_cols[0] if numeric_cols else None)
+        if feature_col and importance_col:
+            plot_data = shap[[feature_col, importance_col]].dropna().sort_values(importance_col, ascending=False).head(15)
+            st.markdown("**Most influential features**")
+            st.bar_chart(plot_data.set_index(feature_col), color="#db2777")
+        st.dataframe(shap, use_container_width=True)
+    else:
+        st.info("SHAP feature-importance data was not found.")
+    st.markdown("#### Export selected records")
+    st.download_button("⬇️ Download filtered decision-support data",
+        data=df.to_csv(index=False).encode("utf-8"), file_name="urbanev_decision_support_filtered.csv",
+        mime="text/csv")
 
-if probability_pct is not None:
-    df["risk_percentage"] = probability_pct
-
-    def risk_label(p):
-        if pd.isna(p):
-            return "Unknown"
-        if p < 20:
-            return "Low"
-        if p < 40:
-            return "Moderate"
-        if p < 60:
-            return "High"
-        return "Very High"
-
-    df["risk_category_display"] = df["risk_percentage"].apply(risk_label)
-
-    risk_counts = (
-        df["risk_category_display"]
-        .value_counts()
-        .reindex(["Low", "Moderate", "High", "Very High"], fill_value=0)
-    )
-
-    st.bar_chart(risk_counts)
-
-    attention = df[
-        df["risk_category_display"].isin(["High", "Very High"])
-    ].copy()
-
-    st.write(f"**Zones requiring attention:** {attention['zone_id'].nunique() if 'zone_id' in attention.columns else len(attention):,}")
-    if not attention.empty:
-        preferred = [
-            "time", "zone_id", "occupancy", prob_col,
-            "risk_category", "risk_category_display",
-            "dynamic_price", "price_change", "price_increase_pct",
-            "recommended_action"
-        ]
-
-        visible = [c for c in preferred if c in attention.columns]
-
-        attention_display = attention[visible].copy()
-        attention_display["risk_percentage"] = attention["risk_percentage"]
-
-        st.dataframe(
-            attention_display.sort_values(
-                "risk_percentage", ascending=False
-            ),
-            use_container_width=True,
-            height=350
-        )
-    
-# Pricing analysis
-st.subheader("Dynamic Pricing")
-
-if price_col and "time" in df.columns:
-    price_trend = df.dropna(subset=["time"]).copy()
-    if not price_trend.empty:
-        price_trend["hour"] = price_trend["time"].dt.floor("D")
-        daily_price = price_trend.groupby("hour")[price_col].mean()
-        st.line_chart(daily_price)
-
-if "price_increase_pct" in df.columns:
-    st.write("Price adjustment distribution")
-    st.bar_chart(df["price_increase_pct"].value_counts().sort_index())
-
-# Spatial information
-st.subheader("Charging Zone Information")
-
-if zones is not None:
-    st.write("Available zone metadata")
-    st.dataframe(zones, use_container_width=True, height=250)
-
-    if {"longitude", "latitude"}.issubset(zones.columns):
-        map_data = zones[["latitude", "longitude"]].copy()
-        map_data = map_data.apply(pd.to_numeric, errors="coerce").dropna()
-        if not map_data.empty:
-            st.map(map_data)
-
-# SHAP information
-st.subheader("Model Explainability (SHAP)")
-
-if shap is not None:
-    st.dataframe(shap, use_container_width=True)
-    numeric_cols = shap.select_dtypes(include=np.number).columns.tolist()
-    feature_col = next(
-        (c for c in shap.columns if "feature" in c.lower()),
-        shap.columns[0] if len(shap.columns) else None
-    )
-    importance_col = next(
-        (c for c in numeric_cols if "importance" in c.lower() or "shap" in c.lower()),
-        numeric_cols[0] if numeric_cols else None
-    )
-
-    if feature_col and importance_col:
-        plot_data = shap[[feature_col, importance_col]].dropna()
-        plot_data = plot_data.sort_values(importance_col, ascending=False).head(15)
-        st.bar_chart(plot_data.set_index(feature_col))
-
-# Export
-st.subheader("Export Results")
-st.download_button(
-    "Download filtered decision-support data",
-    data=df.to_csv(index=False).encode("utf-8"),
-    file_name="urbanev_decision_support_filtered.csv",
-    mime="text/csv"
-)
-
-st.info(
-    "Pricing recommendations are simulation-based. They should be "
-    "validated against driver response and operational constraints before "
-    "being used in a live charging network."
-)
+st.markdown("---")
+st.markdown("""<div style="background:#eef2ff;border:1px solid #c7d2fe;border-radius:14px;padding:1rem 1.2rem;color:#3730a3;">
+<strong>ℹ️ Important note</strong><br>Congestion probabilities are model estimates. Pricing recommendations are simulation-based and should be validated before live deployment.
