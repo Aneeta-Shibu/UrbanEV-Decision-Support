@@ -1,0 +1,4 @@
+Pricing Strategy,Mean Price,Minimum Price,Maximum Price,Observations
+Fixed Pricing,0.7273,0.0,1.45,238975
+Dynamic Pricing,0.7399,0.0,1.5225,238975
+Advanced Dynamic Pricing (Model 2),0.7408,0.0,1.5589,238975
