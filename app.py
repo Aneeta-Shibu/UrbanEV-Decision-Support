@@ -479,6 +479,9 @@ else:
 st.divider()
 st.caption("UrbanEV · Interactive EV charging and network decision-support prototype · Historical UrbanEV Shenzhen data")
 '''
-out = Path("/mnt/data/app_user_friendly.py")
-out.write_text(code, encoding="utf-8")
-print(f"Created {out} with {len(code.splitlines())} lines.")
+st.download_button(
+    label="Download Interactive App Code",
+    data=code,
+    file_name="app_user_friendly.py",
+    mime="text/x-python"
+)
