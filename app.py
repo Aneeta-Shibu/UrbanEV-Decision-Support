@@ -1,6 +1,4 @@
-from pathlib import Path
-
-code = r'''import streamlit as st
+import streamlit as st
 import pandas as pd
 import numpy as np
 import plotly.express as px
@@ -9,479 +7,542 @@ from pathlib import Path
 try:
     import folium
     from streamlit_folium import st_folium
-    HAS_MAP = True
-except Exception:
-    HAS_MAP = False
+    FOLIUM_AVAILABLE = True
+except ImportError:
+    FOLIUM_AVAILABLE = False
 
-# ---------------------------------------------------------
-# PAGE + VISUAL STYLE
-# ---------------------------------------------------------
 st.set_page_config(
-    page_title="UrbanEV | Smart Charging",
+    page_title="UrbanEV | Smart Charging Network",
     page_icon="⚡",
     layout="wide",
     initial_sidebar_state="expanded"
 )
 
-st.markdown("""
-<style>
-:root { color-scheme: dark; }
-.stApp { background: #0b1220; color: #e8eef7; }
-[data-testid="stHeader"] { background: rgba(11,18,32,0.92); }
-[data-testid="stSidebar"] { background: #111c2d; }
-.block-container { padding-top: 1.1rem; padding-bottom: 2.2rem; max-width: 1500px; }
-h1,h2,h3 { color: #f4f8fc; }
-p, label, .stMarkdown { color: #d5deea; }
-div[data-testid="stMetric"] {
-    background: #142238; border: 1px solid #263b54;
-    padding: 15px 16px; border-radius: 14px;
-}
-div[data-testid="stMetricLabel"] { color: #aebfd1; }
-div[data-testid="stMetricValue"] { color: #f4f8fc; }
-div[data-testid="stMetricDelta"] { color: #35d0a0; }
-.stSelectbox div[data-baseweb="select"] > div,
-.stDateInput div[data-baseweb="input"] {
-    background: #142238; border-color: #31465f; border-radius: 10px;
-}
-.hero {
-    background: linear-gradient(115deg,#10283e 0%,#124b50 58%,#12645c 100%);
-    padding: 1.35rem 1.6rem; border: 1px solid #28666b;
-    border-radius: 18px; margin-bottom: 1.2rem;
-}
-.hero h1 { margin: 0; color: #ffffff; font-size: 2rem; }
-.hero p { margin: .35rem 0 0 0; color: #d5f2ec; }
-.panel {
-    background: #142238; border: 1px solid #263b54;
-    border-radius: 14px; padding: 16px 18px; margin-bottom: 10px;
-}
-.pill {
-    display: inline-block; padding: 5px 10px; border-radius: 20px;
-    background: #173e3b; color: #75e3c4; font-size: .82rem;
-    border: 1px solid #27665b;
-}
-div.stButton > button {
-    background: #13a88a; color: white; border: 0;
-    border-radius: 10px; font-weight: 650; min-height: 2.7rem;
-}
-div.stButton > button:hover { background: #0e8c74; color: white; border: 0; }
-[data-testid="stDataFrame"] { border: 1px solid #263b54; border-radius: 10px; }
-hr { border-color: #263b54; }
-.small-muted { color: #9aadc2; font-size: .88rem; }
-</style>
-""", unsafe_allow_html=True)
+BASE_DIR = Path(__file__).resolve().parent
 
-ROOT = Path(__file__).resolve().parent
-FILES = {
-    "pricing": "dynamic_pricing_simulation.csv",
-    "decision": "intelligent_decision_support.csv",
-    "comparison": "final_pricing_comparison.csv",
-    "zones": "zone-information.csv",
-    "xgb": "spatial_model_test_predictions.csv",
-    "sensitivity": "sensitivity_analysis.csv",
-    "neighbours": "nearest_alternative_zones.csv",
-    "stgnn": "residual_stgnn_comparison.csv",
-    "shap": "shap_feature_importance.csv",
+# Supports the uploaded filenames with or without "(1)" suffixes.
+FILE_CANDIDATES = {
+    "pricing": ["dynamic_pricing_simulation.csv"],
+    "decision": ["intelligent_decision_support.csv"],
+    "comparison": ["final_pricing_comparison.csv", "final_pricing_comparison (1).csv"],
+    "zones": ["zone-information.csv", "zone_information.csv"],
+    "predictions": ["spatial_model_test_predictions.csv",
+                    "spatial_model_test_predictions (1).csv"],
+    "sensitivity": ["sensitivity_analysis.csv", "sensitivity_analysis (1).csv"],
+    "alternatives": ["nearest_alternative_zones.csv",
+                     "nearest_alternative_zones (1).csv"],
+    "neighbours": ["zone_neighbours.csv"],
+    "stgnn": ["residual_stgnn_comparison.csv",
+              "residual_stgnn_comparison (1).csv"],
+    "shap": ["shap_feature_importance.csv"],
 }
 
 @st.cache_data(show_spinner=False)
-def read_file(path, modified):
+def read_csv(path, modified):
     try:
         return pd.read_csv(path)
-    except Exception:
+    except Exception as exc:
         return None
 
-def load(key):
-    path = ROOT / FILES[key]
-    return read_file(str(path), path.stat().st_mtime) if path.exists() else None
-
-data = {k: load(k) for k in FILES}
-pricing = data["pricing"]
-xgb = data["xgb"]
-zones = data["zones"]
-neighbours = data["neighbours"]
-comparison = data["comparison"]
-sensitivity = data["sensitivity"]
-stgnn = data["stgnn"]
-
-def find_col(df, choices):
-    if df is None:
-        return None
-    normal = {str(c).strip().lower().replace(" ", "_"): c for c in df.columns}
-    for item in choices:
-        key = item.lower().replace(" ", "_")
-        if key in normal:
-            return normal[key]
+def find_file(key):
+    for filename in FILE_CANDIDATES[key]:
+        path = BASE_DIR / filename
+        if path.exists():
+            return path
+    # Fallback: match a candidate's base name when the upload tool changes suffixes.
+    for candidate in FILE_CANDIDATES[key]:
+        stem = Path(candidate).stem.split(" (")[0]
+        matches = sorted(BASE_DIR.glob(stem + "*.csv"))
+        if matches:
+            return matches[0]
     return None
 
-def prep(df):
+def load_data(key):
+    path = find_file(key)
+    return read_csv(str(path), path.stat().st_mtime) if path else None
+
+data = {key: load_data(key) for key in FILE_CANDIDATES}
+pricing = data["pricing"]
+decision = data["decision"]
+comparison = data["comparison"]
+zones = data["zones"]
+predictions = data["predictions"]
+sensitivity = data["sensitivity"]
+alternatives = data["alternatives"]
+neighbours = data["neighbours"]
+stgnn = data["stgnn"]
+shap_data = data["shap"]
+
+def norm(value):
+    return str(value).strip().lower().replace(" ", "_").replace("-", "_").replace("/", "_")
+
+def col(df, names):
+    if df is None:
+        return None
+    lookup = {norm(c): c for c in df.columns}
+    for name in names:
+        if norm(name) in lookup:
+            return lookup[norm(name)]
+    return None
+
+def num(series):
+    return pd.to_numeric(series, errors="coerce")
+
+def money(value):
+    return "N/A" if pd.isna(value) else f"{value:.4f}"
+
+def pct(value):
+    return "N/A" if pd.isna(value) else f"{value:.2f}%"
+
+def clean_zone(df):
     if df is None:
         return None
     out = df.copy()
-    z = find_col(out, ["zone_id", "TAZID", "taz_id", "zone"])
-    if z and z != "zone_id":
-        out = out.rename(columns={z: "zone_id"})
-    if "zone_id" in out:
-        out["zone_id"] = out["zone_id"].astype(str).str.replace(r"\.0$", "", regex=True)
-    t = find_col(out, ["time", "timestamp", "datetime"])
-    if t:
-        out[t] = pd.to_datetime(out[t], errors="coerce")
+    zone_col = col(out, ["zone_id", "tazid", "zone", "taz_id"])
+    if zone_col and zone_col != "zone_id":
+        out = out.rename(columns={zone_col: "zone_id"})
+    if "zone_id" in out.columns:
+        out["zone_id"] = (
+            out["zone_id"].astype("string").str.strip()
+            .str.replace(r"\.0$", "", regex=True)
+        )
+        out = out.dropna(subset=["zone_id"])
+        out = out[out["zone_id"] != ""]
+    time_col = col(out, ["time", "timestamp", "datetime"])
+    if time_col:
+        out[time_col] = pd.to_datetime(out[time_col], errors="coerce")
     return out
 
-pricing, xgb, zones, neighbours = map(prep, [pricing, xgb, zones, neighbours])
+pricing = clean_zone(pricing)
+decision = clean_zone(decision)
+predictions = clean_zone(predictions)
+zones = clean_zone(zones)
+alternatives = clean_zone(alternatives)
+neighbours = clean_zone(neighbours)
 
-zone_ids = set()
-for frame in [zones, xgb, pricing]:
-    if frame is not None and "zone_id" in frame:
-        zone_ids.update(frame["zone_id"].dropna().astype(str).tolist())
-zone_ids = sorted(zone_ids, key=lambda x: (not x.isdigit(), int(x) if x.isdigit() else x))
+def safe_mean(df, column):
+    return num(df[column]).mean() if df is not None and column else np.nan
 
-if "active_zone" not in st.session_state and zone_ids:
-    st.session_state.active_zone = zone_ids[0]
-if st.session_state.get("active_zone") not in zone_ids and zone_ids:
-    st.session_state.active_zone = zone_ids[0]
-
-def zone_rows(df, zone=None):
-    zone = str(zone or st.session_state.get("active_zone", ""))
-    if df is None or "zone_id" not in df:
+def safe_zone_filter(df, zone):
+    if df is None or zone is None or "zone_id" not in df.columns:
         return pd.DataFrame()
-    return df[df["zone_id"].astype(str) == zone].copy()
+    return df[df["zone_id"].astype(str) == str(zone)].copy()
 
-def mean_num(df, column):
-    if df is None or column is None or column not in df:
-        return np.nan
-    return pd.to_numeric(df[column], errors="coerce").mean()
+def sorted_zone_ids():
+    ids = set()
+    for frame in [predictions, pricing, decision, zones, alternatives, neighbours]:
+        if frame is not None and "zone_id" in frame.columns:
+            ids.update(frame["zone_id"].dropna().astype(str).tolist())
+    return sorted(ids, key=lambda x: (not x.isdigit(), int(x) if x.isdigit() else x))
 
-def money(x):
-    return "Not available" if pd.isna(x) else f"¥{x:.3f}"
-
-def pct(x):
-    return "Not available" if pd.isna(x) else f"{x:.1f}%"
-
-def metric_row(items):
-    cols = st.columns(len(items))
-    for c, (label, value, delta) in zip(cols, items):
-        c.metric(label, value, delta)
-
-def get_map_frame():
-    if zones is None or zones.empty or "zone_id" not in zones:
-        return pd.DataFrame()
-    m = zones.copy()
-    lat = find_col(m, ["latitude", "lat"])
-    lon = find_col(m, ["longitude", "lon", "long"])
-    if not lat or not lon:
-        return pd.DataFrame()
-    if xgb is not None and "zone_id" in xgb:
-        occ = find_col(xgb, ["occupancy"])
-        prob = find_col(xgb, ["predicted_congestion_probability"])
-        aggregations = {}
-        if occ: aggregations[occ] = "mean"
-        if prob: aggregations[prob] = "mean"
-        if aggregations:
-            summary = xgb.groupby("zone_id").agg(aggregations).reset_index()
-            rename = {}
-            if occ: rename[occ] = "mean_occupancy"
-            if prob: rename[prob] = "mean_risk"
-            m = m.merge(summary.rename(columns=rename), on="zone_id", how="left")
-    return m.dropna(subset=[lat, lon]), lat, lon
-
-def render_map(height=520):
-    result = get_map_frame()
-    if isinstance(result, tuple):
-        m, lat, lon = result
-    else:
-        m = result
-        lat = lon = None
-    if m.empty:
-        st.info("Map coordinates are unavailable. Check zone-information.csv contains latitude and longitude.")
-        return
-    if not HAS_MAP:
-        st.warning("For clickable map selection, add folium and streamlit-folium to requirements.txt.")
-        st.map(m[[lat, lon]].rename(columns={lat: "latitude", lon: "longitude"}))
-        return
-    center = [m[lat].astype(float).mean(), m[lon].astype(float).mean()]
-    fmap = folium.Map(location=center, zoom_start=11, tiles="CartoDB dark_matter")
-    for _, row in m.iterrows():
-        zid = str(row["zone_id"])
-        risk = row.get("mean_risk", np.nan)
-        occupancy = row.get("mean_occupancy", np.nan)
-        colour = "purple" if zid == str(st.session_state.active_zone) else (
-            "red" if pd.notna(risk) and risk >= .5 else ("green" if pd.notna(risk) else "blue")
-        )
-        popup = f"<b>Zone {zid}</b>"
-        if pd.notna(occupancy): popup += f"<br>Mean occupancy: {occupancy:.2f}"
-        if pd.notna(risk): popup += f"<br>Mean congestion probability: {risk:.3f}"
-        folium.CircleMarker(
-            [float(row[lat]), float(row[lon])],
-            radius=8 if zid == str(st.session_state.active_zone) else 5,
-            color=colour, fill=True, fill_opacity=.85,
-            tooltip=f"Select Zone {zid}",
-            popup=folium.Popup(popup, max_width=250)
-        ).add_to(fmap)
-    result = st_folium(fmap, height=height, use_container_width=True,
-                       key="urban_ev_click_map", returned_objects=["last_object_clicked"])
-    click = result.get("last_object_clicked") if isinstance(result, dict) else None
-    if click and click.get("lat") is not None and click.get("lng") is not None:
-        distances = ((m[lat].astype(float) - float(click["lat"])) ** 2
-                     + (m[lon].astype(float) - float(click["lng"])) ** 2)
-        nearest = str(m.loc[distances.idxmin(), "zone_id"])
-        if nearest in zone_ids and nearest != st.session_state.active_zone:
-            st.session_state.active_zone = nearest
-            st.rerun()
-    st.caption("Purple: selected zone · Red: higher predicted congestion risk · Green: lower risk · Blue: prediction unavailable. Click a marker to select it.")
-
-def zone_selector():
-    if not zone_ids:
-        st.error("Zone IDs were not found. Upload zone-information.csv and the prediction/pricing files.")
-        return None
-    current = st.session_state.active_zone
-    choice = st.selectbox("Choose a charging zone", zone_ids,
-                          index=zone_ids.index(current), key="zone_picker")
-    st.session_state.active_zone = choice
-    return choice
-
-def zone_snapshot(zone):
-    pred = zone_rows(xgb, zone)
-    price = zone_rows(pricing, zone)
-    occ_c = find_col(pred, ["occupancy"])
-    risk_c = find_col(pred, ["predicted_congestion_probability"])
-    base_c = find_col(price, ["service_price"])
-    opt_c = find_col(price, ["optimized_service_price", "dynamic_price"])
-    occ = mean_num(pred, occ_c)
-    risk = mean_num(pred, risk_c)
-    base = mean_num(price, base_c)
-    opt = mean_num(price, opt_c)
-    return pred, price, occ, risk, base, opt
-
-# ---------------------------------------------------------
-# APP NAVIGATION
-# ---------------------------------------------------------
-st.sidebar.markdown("## ⚡ UrbanEV")
-st.sidebar.caption("Smart charging network")
-experience = st.sidebar.radio("Choose experience", ["🚗 EV Driver", "🏙️ Network Operator"])
-st.sidebar.divider()
-st.sidebar.markdown("**Charging zone**")
-selected = zone_selector()
-st.sidebar.caption("Shenzhen · UrbanEV research dataset")
-st.sidebar.caption("Historical study period: Sep 2022 – Feb 2023")
+zone_options = sorted_zone_ids()
 
 st.markdown("""
+<style>
+.block-container {padding-top: 1.1rem; padding-bottom: 2rem;}
+[data-testid="stMetric"] {
+    background: #ffffff; border: 1px solid #e6eaf0;
+    padding: 12px 14px; border-radius: 12px;
+}
+.hero {
+    padding: 1.25rem 1.5rem; border-radius: 14px;
+    background: linear-gradient(115deg, #102d46, #176b72);
+    color: white; margin-bottom: 1rem;
+}
+.hero h1 {color: white; margin: 0 0 .3rem 0;}
+.hero p {color: #e5f2f4; margin: 0;}
+</style>
+""", unsafe_allow_html=True)
+
+st.sidebar.markdown("## ⚡ UrbanEV")
+st.sidebar.caption("Interactive EV charging network decision support")
+pages = [
+    "Interactive Zone Explorer",
+    "Network Overview",
+    "Congestion Prediction",
+    "Occupancy Forecasting",
+    "Dynamic Pricing",
+    "Demand Redistribution",
+    "Model & Scenario Analysis",
+]
+page = st.sidebar.radio("Application", pages)
+
+if zone_options:
+    if st.session_state.get("selected_zone") not in zone_options:
+        st.session_state.selected_zone = zone_options[0]
+    selected_zone = st.sidebar.selectbox(
+        "Select charging zone", zone_options,
+        index=zone_options.index(st.session_state.selected_zone)
+    )
+    st.session_state.selected_zone = selected_zone
+else:
+    selected_zone = None
+    st.sidebar.error("No zone IDs found. Check the uploaded prediction or pricing CSV files.")
+
+st.sidebar.caption("UrbanEV Shenzhen | Jan–Feb 2023")
+st.markdown("""
 <div class="hero">
-  <h1>UrbanEV Smart Charging</h1>
-  <p>Find suitable charging zones. Understand congestion. Explore smarter pricing.</p>
+<h1>UrbanEV Smart Charging Network</h1>
+<p>Zone-level congestion prediction, occupancy analysis and dynamic pricing decision support</p>
 </div>
 """, unsafe_allow_html=True)
 
-# ---------------------------------------------------------
-# EV DRIVER EXPERIENCE
-# ---------------------------------------------------------
-if experience == "🚗 EV Driver":
-    st.markdown("### Find a charging zone")
-    st.write("Choose a zone to explore its charging activity, congestion outlook, prices and nearby alternatives.")
-    selected = zone_selector() if selected is None else selected
+def show_zone_metrics():
+    zp = safe_zone_filter(predictions, selected_zone)
+    zr = safe_zone_filter(pricing, selected_zone)
+    occ = col(zp, ["occupancy"])
+    probability = col(zp, ["predicted_congestion_probability"])
+    base = col(zr, ["service_price", "base_price"])
+    dynamic = col(zr, ["dynamic_price", "optimized_service_price"])
+    a, b, c, d = st.columns(4)
+    a.metric("Selected zone", selected_zone or "N/A")
+    average_occupancy = safe_mean(zp, occ) if occ else np.nan
+    b.metric("Average occupancy", f"{average_occupancy:.2f}" if pd.notna(average_occupancy) else "N/A")
+    mean_prob = safe_mean(zp, probability) * 100 if probability else np.nan
+    c.metric("Mean congestion probability", pct(mean_prob))
+    if base and dynamic:
+        change = safe_mean(zr, dynamic) - safe_mean(zr, base)
+        d.metric("Mean service-price change", money(change))
+    else:
+        d.metric("Pricing records", f"{len(zr):,}" if not zr.empty else "N/A")
 
-    if selected is not None:
-        pred, price, occ, risk, base, opt = zone_snapshot(selected)
-        risk_pct = risk * 100 if pd.notna(risk) else np.nan
-        status = ("High expected congestion" if pd.notna(risk) and risk >= .5
-                  else "Lower expected congestion" if pd.notna(risk)
-                  else "Prediction unavailable")
-        st.markdown(f'<span class="pill">Selected charging zone: {selected}</span> &nbsp; <span class="pill">{status}</span>', unsafe_allow_html=True)
-        st.write("")
-        metric_row([
-            ("Observed average occupancy", f"{occ:.1f}" if pd.notna(occ) else "N/A", None),
-            ("Next-hour congestion likelihood", pct(risk_pct), None),
-            ("Current service price", money(base), None),
-            ("Simulated optimised price", money(opt), None),
-        ])
+def draw_zone_map():
+    if zones is None or zones.empty:
+        st.info("Map unavailable: zone-information.csv with zone_id, latitude and longitude was not included. The neighbour files contain distances, not coordinates.")
+        return
+    lat = col(zones, ["latitude", "lat"])
+    lon = col(zones, ["longitude", "lon", "long"])
+    if not lat or not lon:
+        st.info("Map unavailable: the zone-information file needs latitude and longitude columns.")
+        return
+    md = zones.copy()
+    md[lat] = num(md[lat])
+    md[lon] = num(md[lon])
+    md = md.dropna(subset=[lat, lon])
+    md = md[md[lat].between(-90, 90) & md[lon].between(-180, 180)]
+    if md.empty:
+        st.warning("No valid zone coordinates were found.")
+        return
+    if not FOLIUM_AVAILABLE:
+        st.map(md[[lat, lon]].rename(columns={lat: "latitude", lon: "longitude"}))
+        st.caption("Install folium and streamlit-folium to enable clickable zone markers.")
+        return
+    center = [md[lat].mean(), md[lon].mean()]
+    fmap = folium.Map(location=center, zoom_start=11, tiles="CartoDB positron")
+    prob_col = col(predictions, ["predicted_congestion_probability"])
+    occ_col = col(predictions, ["occupancy"])
+    summary = None
+    if predictions is not None and "zone_id" in predictions.columns:
+        aggregations = {}
+        if prob_col: aggregations[prob_col] = "mean"
+        if occ_col: aggregations[occ_col] = "mean"
+        if aggregations:
+            summary = predictions.groupby("zone_id").agg(aggregations).reset_index()
+            summary = summary.rename(columns={
+                prob_col: "mean_probability" if prob_col else prob_col,
+                occ_col: "mean_occupancy" if occ_col else occ_col
+            })
+            md = md.merge(summary, on="zone_id", how="left")
+    for _, row in md.iterrows():
+        zid = str(row["zone_id"])
+        probability = row.get("mean_probability", np.nan)
+        colour = "purple" if zid == str(selected_zone) else (
+            "red" if pd.notna(probability) and probability >= .5 else
+            "green" if pd.notna(probability) else "blue"
+        )
+        popup = f"Zone: {zid}"
+        if pd.notna(row.get("mean_occupancy", np.nan)):
+            popup += f"<br>Mean occupancy: {row['mean_occupancy']:.2f}"
+        if pd.notna(probability):
+            popup += f"<br>Mean congestion probability: {probability:.3f}"
+        folium.CircleMarker(
+            [row[lat], row[lon]], radius=8 if zid == str(selected_zone) else 5,
+            color=colour, fill=True, fill_opacity=.8,
+            tooltip=f"Zone {zid}", popup=folium.Popup(popup, max_width=260)
+        ).add_to(fmap)
+    result = st_folium(fmap, use_container_width=True, height=540,
+                       key="urbanev_map", returned_objects=["last_object_clicked"])
+    clicked = result.get("last_object_clicked") if isinstance(result, dict) else None
+    if clicked and clicked.get("lat") is not None and clicked.get("lng") is not None:
+        distances = ((md[lat] - float(clicked["lat"])) ** 2 +
+                     (md[lon] - float(clicked["lng"])) ** 2)
+        clicked_zone = str(md.loc[distances.idxmin(), "zone_id"])
+        if clicked_zone in zone_options and clicked_zone != selected_zone:
+            st.session_state.selected_zone = clicked_zone
+            st.rerun()
+    st.caption("Purple = selected; red = mean predicted congestion probability ≥ 0.50; green = below 0.50; blue = no prediction.")
 
-        left, right = st.columns([1.15, .85], gap="large")
-        with left:
-            st.markdown("#### Charging zone map")
-            render_map(510)
-        with right:
-            st.markdown("#### Is this zone a suitable choice?")
-            if pd.isna(risk):
-                st.info("There is no linked congestion prediction for this zone in the current prediction file.")
-            elif risk >= .5:
-                st.warning("This zone has an elevated predicted chance of high occupancy. Consider checking nearby alternatives.")
-            else:
-                st.success("The model indicates a lower predicted chance of high occupancy for this zone.")
-            if pd.notna(base) and pd.notna(opt):
-                change = ((opt / base) - 1) * 100 if base else np.nan
-                st.markdown('<div class="panel">', unsafe_allow_html=True)
-                st.markdown("**Service price comparison**")
-                st.write(f"Existing service price: **{money(base)}**")
-                st.write(f"Simulated optimised service price: **{money(opt)}**")
-                st.write(f"Price change in this simulation: **{pct(change)}**")
-                st.markdown('<span class="small-muted">These are simulated service prices, not live charging tariffs.</span>', unsafe_allow_html=True)
-                st.markdown('</div>', unsafe_allow_html=True)
-            else:
-                st.info("Pricing information is not available for this zone.")
-
+if page == "Interactive Zone Explorer":
+    st.title("Interactive Zone Explorer")
+    st.write("Select a zone from the sidebar. Zone-level prediction, pricing and decision-support information will update.")
+    if selected_zone is None:
+        st.error("No charging zones are available.")
+    else:
+        show_zone_metrics()
+        st.subheader("Charging-zone map")
+        draw_zone_map()
         st.divider()
-        st.markdown("#### Zone activity")
-        if not pred.empty:
-            t = find_col(pred, ["time"])
-            occ_c = find_col(pred, ["occupancy"])
-            prob_c = find_col(pred, ["predicted_congestion_probability"])
+        zp = safe_zone_filter(predictions, selected_zone)
+        zd = safe_zone_filter(decision, selected_zone)
+        zr = safe_zone_filter(pricing, selected_zone)
+        if not zp.empty:
+            t = col(zp, ["time"])
+            o = col(zp, ["occupancy"])
+            pr = col(zp, ["predicted_congestion_probability"])
             if t:
-                pred = pred.sort_values(t)
-            if t and occ_c:
-                st.plotly_chart(px.line(pred, x=t, y=occ_c,
-                    title=f"Observed occupancy · Zone {selected}",
-                    labels={t: "Time", occ_c: "Occupancy"},
-                    template="plotly_dark"), use_container_width=True)
-            if t and prob_c:
-                chart = pred.copy()
-                chart["Congestion likelihood (%)"] = pd.to_numeric(chart[prob_c], errors="coerce") * 100
-                st.plotly_chart(px.line(chart, x=t, y="Congestion likelihood (%)",
-                    title="Predicted chance of high occupancy in the next hour",
-                    template="plotly_dark"), use_container_width=True)
+                zp = zp.sort_values(t)
+            if t and o:
+                st.subheader("Observed occupancy over time")
+                st.plotly_chart(px.line(zp, x=t, y=o, title=f"Zone {selected_zone}: observed occupancy"), use_container_width=True)
+            if t and pr:
+                chart = zp.copy()
+                chart[pr] = num(chart[pr]) * 100
+                st.subheader("Predicted congestion probability")
+                st.plotly_chart(px.line(chart, x=t, y=pr, labels={pr: "Probability (%)"}), use_container_width=True)
+            st.subheader("Prediction records")
+            st.dataframe(zp.head(500), use_container_width=True, hide_index=True)
         else:
-            st.info("No zone-level prediction records are available for the selected zone.")
+            st.info("No prediction records are available for this zone.")
+        if not zd.empty:
+            st.subheader("Intelligent decision-support recommendations")
+            st.dataframe(zd.head(200), use_container_width=True, hide_index=True)
+        if not zr.empty:
+            base = col(zr, ["service_price", "base_price"])
+            dyn = col(zr, ["dynamic_price", "optimized_service_price"])
+            t = col(zr, ["time"])
+            if base and dyn:
+                st.subheader("Fixed and dynamic service-price comparison")
+                if t:
+                    long = zr.sort_values(t).melt(
+                        id_vars=[t], value_vars=[base, dyn],
+                        var_name="Pricing strategy", value_name="Service price"
+                    )
+                    st.plotly_chart(px.line(long, x=t, y="Service price",
+                                            color="Pricing strategy"), use_container_width=True)
+                st.dataframe(zr[[c for c in [t, base, dyn, col(zr, ["price_change", "price_increase_pct"])] if c]], use_container_width=True, hide_index=True)
 
-        st.divider()
-        st.markdown("#### Nearby alternatives")
-        if neighbours is not None and not neighbours.empty:
-            n = neighbours.copy()
-            cols_lower = {str(c).lower().replace(" ", "_"): c for c in n.columns}
-            origin_c = next((cols_lower[k] for k in ["zone_id", "origin_zone", "source_zone", "tazid"] if k in cols_lower), None)
-            if origin_c:
-                n[origin_c] = n[origin_c].astype(str).str.replace(r"\.0$", "", regex=True)
-                alternatives = n[n[origin_c] == str(selected)]
+elif page == "Network Overview":
+    st.title("Network Overview")
+    st.write("Network-level summary of the uploaded test-period prediction and pricing records.")
+    c1, c2, c3 = st.columns(3)
+    c1.metric("Charging zones", f"{len(zone_options):,}")
+    c2.metric("Prediction records", f"{len(predictions):,}" if predictions is not None else "N/A")
+    c3.metric("Pricing records", f"{len(pricing):,}" if pricing is not None else "N/A")
+    if predictions is not None:
+        occ = col(predictions, ["occupancy"])
+        t = col(predictions, ["time"])
+        z = col(predictions, ["zone_id"])
+        if occ:
+            st.subheader("Occupancy distribution")
+            st.plotly_chart(px.histogram(predictions, x=occ, nbins=45), use_container_width=True)
+        if occ and t:
+            hourly = predictions.assign(hour=predictions[t].dt.hour).groupby("hour", as_index=False)[occ].mean()
+            st.subheader("Average occupancy by hour")
+            st.plotly_chart(px.line(hourly, x="hour", y=occ, markers=True), use_container_width=True)
+        if occ and z:
+            top = predictions.groupby(z)[occ].mean().nlargest(15).reset_index()
+            st.subheader("15 zones with highest average occupancy")
+            st.plotly_chart(px.bar(top, x=z, y=occ), use_container_width=True)
+    st.subheader("Zone map")
+    draw_zone_map()
+
+elif page == "Congestion Prediction":
+    st.title("Zone-level Congestion Prediction")
+    st.write("The uploaded XGBoost prediction file contains predicted congestion probabilities and high-occupancy labels.")
+    view = safe_zone_filter(predictions, selected_zone)
+    if view.empty:
+        st.warning("No prediction records found for the selected zone.")
+    else:
+        probability = col(view, ["predicted_congestion_probability"])
+        actual = col(view, ["actual_high_occupancy"])
+        predicted = col(view, ["predicted_high_occupancy"])
+        t = col(view, ["time"])
+        occ = col(view, ["occupancy"])
+        a, b, c = st.columns(3)
+        a.metric("Mean congestion probability", pct(safe_mean(view, probability) * 100 if probability else np.nan))
+        b.metric("Actual high-occupancy share", pct(safe_mean(view, actual) * 100 if actual else np.nan))
+        c.metric("Predicted high-occupancy share", pct(safe_mean(view, predicted) * 100 if predicted else np.nan))
+        if t and probability:
+            chart = view.sort_values(t).copy()
+            chart[probability] = num(chart[probability]) * 100
+            st.plotly_chart(px.line(chart, x=t, y=probability,
+                                    labels={probability: "Probability (%)"},
+                                    title=f"Zone {selected_zone}: predicted congestion probability"),
+                            use_container_width=True)
+        if t and occ:
+            st.plotly_chart(px.line(view.sort_values(t), x=t, y=occ,
+                                    title="Observed occupancy"), use_container_width=True)
+        st.subheader("Prediction records")
+        st.dataframe(view.head(500), use_container_width=True, hide_index=True)
+
+elif page == "Occupancy Forecasting":
+    st.title("Occupancy Forecasting")
+    st.write("Residual ST-GNN model performance based on the supplied model-comparison results.")
+    if stgnn is None:
+        st.warning("residual_stgnn_comparison.csv was not found.")
+    else:
+        st.dataframe(stgnn, use_container_width=True, hide_index=True)
+        model_col = col(stgnn, ["model", "unnamed:_0", "unnamed_0"])
+        mae_col = col(stgnn, ["mae"])
+        rmse_col = col(stgnn, ["rmse"])
+        r2_col = col(stgnn, ["r2", "r_2"])
+        if model_col:
+            residual = stgnn[stgnn[model_col].astype(str).str.contains("Residual ST-GNN", case=False)]
+            if not residual.empty:
+                row = residual.iloc[0]
+                a, b, c = st.columns(3)
+                a.metric("Residual ST-GNN MAE", f"{row[mae_col]:.4f}" if mae_col else "N/A")
+                b.metric("Residual ST-GNN RMSE", f"{row[rmse_col]:.4f}" if rmse_col else "N/A")
+                c.metric("Residual ST-GNN R²", f"{row[r2_col]:.4f}" if r2_col else "N/A")
+    st.info("The supplied files contain model-comparison metrics, but no zone-by-zone actual-versus-forecast time series. A zone-specific forecast chart is therefore not displayed.")
+
+elif page == "Dynamic Pricing":
+    st.title("Interactive Dynamic Pricing")
+    st.write("Compare fixed service prices with dynamic prices for the selected charging zone.")
+    view = safe_zone_filter(pricing, selected_zone)
+    base = col(view, ["service_price", "base_price"])
+    dynamic = col(view, ["dynamic_price", "optimized_service_price"])
+    t = col(view, ["time"])
+    adjustment = col(view, ["price_increase_pct", "price_change"])
+    if view.empty or not base or not dynamic:
+        st.warning("Pricing data or required price columns are unavailable for this zone.")
+    else:
+        old_mean = num(view[base]).mean()
+        new_mean = num(view[dynamic]).mean()
+        change = ((new_mean - old_mean) / old_mean * 100
+                  if pd.notna(old_mean) and old_mean != 0 and pd.notna(new_mean)
+                  else np.nan)
+        a, b, c = st.columns(3)
+        a.metric("Mean fixed service price", money(old_mean))
+        b.metric("Mean dynamic service price", money(new_mean))
+        c.metric("Mean price change", pct(change))
+        if t:
+            long = view.sort_values(t).melt(
+                id_vars=[t], value_vars=[base, dynamic],
+                var_name="Pricing strategy", value_name="Service price"
+            )
+            st.plotly_chart(px.line(long, x=t, y="Service price", color="Pricing strategy",
+                                    title=f"Zone {selected_zone}: price comparison"),
+                            use_container_width=True)
+        if adjustment:
+            st.plotly_chart(px.histogram(view, x=adjustment, nbins=30,
+                                         title="Price adjustment distribution"),
+                            use_container_width=True)
+        st.subheader("Pricing records")
+        st.dataframe(view.head(500), use_container_width=True, hide_index=True)
+    if comparison is not None:
+        st.subheader("Network-wide pricing strategy comparison")
+        st.dataframe(comparison, use_container_width=True, hide_index=True)
+        strategy = col(comparison, ["pricing_strategy"])
+        mean_price = col(comparison, ["mean_price"])
+        if strategy and mean_price:
+            st.plotly_chart(px.bar(comparison, x=strategy, y=mean_price,
+                                   title="Mean service price across pricing strategies"),
+                            use_container_width=True)
+
+elif page == "Demand Redistribution":
+    st.title("Nearby Alternative Zones & Demand Redistribution")
+    st.write("Review nearby alternative charging zones and the supplied price-sensitivity scenarios.")
+    if alternatives is not None:
+        st.subheader("Nearest alternative zones")
+        alt = alternatives.copy()
+        source_zone = col(alt, ["zone_id"])
+        alt_zone = col(alt, ["alternative_zone", "neighbour_zone_id", "neighbor_zone_id"])
+        distance = col(alt, ["distance_km"])
+        if source_zone and alt_zone:
+            alt[source_zone] = alt[source_zone].astype(str).str.replace(r"\.0$", "", regex=True)
+            selected_alternatives = alt[alt[source_zone] == str(selected_zone)] if selected_zone else alt
+            if selected_alternatives.empty:
+                st.info("No alternative-zone records were found for the selected zone.")
             else:
-                alternatives = pd.DataFrame()
-            if not alternatives.empty:
-                st.write("Nearby zones listed for this selected zone:")
-                st.dataframe(alternatives, use_container_width=True, hide_index=True)
-            else:
-                st.info("No matching nearby-zone records were found for this selected zone in nearest_alternative_zones.csv.")
+                st.dataframe(selected_alternatives.sort_values(distance) if distance else selected_alternatives,
+                             use_container_width=True, hide_index=True)
         else:
-            st.info("The nearest-alternative-zone file is not available yet.")
-        st.caption("Congestion estimates and price comparisons are based on historical model outputs and simulations. They are not live charger availability or live tariffs.")
+            st.dataframe(alt.head(300), use_container_width=True, hide_index=True)
+    elif neighbours is not None:
+        st.subheader("Neighbouring zones")
+        st.dataframe(neighbours.head(300), use_container_width=True, hide_index=True)
+    else:
+        st.info("No nearest-alternative or neighbour-zone CSV was found.")
+    if sensitivity is not None:
+        st.subheader("Price-sensitivity scenarios")
+        st.dataframe(sensitivity, use_container_width=True, hide_index=True)
+        sens = col(sensitivity, ["price_sensitivity"])
+        before = col(sensitivity, ["congestion_before_pct"])
+        after = col(sensitivity, ["congestion_after_pct"])
+        if sens and before and after:
+            long = sensitivity.melt(id_vars=[sens], value_vars=[before, after],
+                                    var_name="Scenario", value_name="Congestion (%)")
+            st.plotly_chart(px.line(long, x=sens, y="Congestion (%)", color="Scenario",
+                                    markers=True, title="Congestion before and after by price sensitivity"),
+                            use_container_width=True)
+    st.warning("The supplied scenario file reports simulated demand transfer and congestion changes. These are scenario results, not measured customer behaviour. The pricing and prediction files do not contain zone-level incoming/outgoing volume records.")
 
-# ---------------------------------------------------------
-# NETWORK OPERATOR EXPERIENCE
-# ---------------------------------------------------------
-else:
-    st.markdown("### Charging network control centre")
-    st.write("Monitor network conditions, inspect individual zones and explore pricing and demand-management scenarios.")
-    if selected is not None:
-        pred, price, occ, risk, base, opt = zone_snapshot(selected)
-
-    all_occ = find_col(xgb, ["occupancy"])
-    all_prob = find_col(xgb, ["predicted_congestion_probability"])
-    all_zone = "zone_id" if xgb is not None and "zone_id" in xgb else None
-    total_zones = zones["zone_id"].nunique() if zones is not None and "zone_id" in zones else len(zone_ids)
-    mean_occ = mean_num(xgb, all_occ)
-    mean_risk = mean_num(xgb, all_prob)
-    high_risk_zones = "N/A"
-    if xgb is not None and all_zone and all_prob:
-        risk_by_zone = xgb.groupby(all_zone)[all_prob].mean()
-        high_risk_zones = int((risk_by_zone >= .5).sum())
-    metric_row([
-        ("Charging zones", f"{total_zones:,}", None),
-        ("Prediction records", f"{len(xgb):,}" if xgb is not None else "N/A", None),
-        ("Network average occupancy", f"{mean_occ:.1f}" if pd.notna(mean_occ) else "N/A", None),
-        ("Zones with mean risk ≥ 50%", f"{high_risk_zones:,}" if isinstance(high_risk_zones, int) else high_risk_zones, None),
-    ])
-
-    tab1, tab2, tab3, tab4 = st.tabs(["Live-style network view", "Zone operations", "Pricing controls", "Scenario analysis"])
-
-    with tab1:
-        st.markdown("#### Network congestion map")
-        render_map(550)
-        if xgb is not None and all_zone and all_prob:
-            risk_by_zone = xgb.groupby(all_zone)[all_prob].mean().reset_index()
-            risk_by_zone["Risk category"] = np.where(risk_by_zone[all_prob] >= .5, "Higher risk", "Lower risk")
-            st.markdown("#### Zones to review")
-            st.dataframe(risk_by_zone.sort_values(all_prob, ascending=False).head(15),
-                         use_container_width=True, hide_index=True)
-
-    with tab2:
-        st.markdown(f"#### Zone {selected} operations")
-        if selected is not None:
-            pred, price, occ, risk, base, opt = zone_snapshot(selected)
-            metric_row([
-                ("Average occupancy", f"{occ:.2f}" if pd.notna(occ) else "N/A", None),
-                ("Mean congestion probability", pct(risk * 100 if pd.notna(risk) else np.nan), None),
-                ("Existing service price", money(base), None),
-                ("Optimised service price", money(opt), None),
-            ])
-            if not pred.empty:
-                time_c = find_col(pred, ["time"])
-                occ_c = find_col(pred, ["occupancy"])
-                prob_c = find_col(pred, ["predicted_congestion_probability"])
-                if time_c and occ_c:
-                    pred = pred.sort_values(time_c)
-                    st.plotly_chart(px.line(pred, x=time_c, y=occ_c,
-                        title="Selected-zone occupancy trend", template="plotly_dark"),
-                        use_container_width=True)
-                if time_c and prob_c:
-                    st.plotly_chart(px.line(pred, x=time_c, y=prob_c,
-                        title="Selected-zone predicted congestion probability", template="plotly_dark"),
-                        use_container_width=True)
-                st.dataframe(pred.head(300), use_container_width=True, hide_index=True)
-            else:
-                st.info("No prediction records are available for this zone.")
-
-    with tab3:
-        st.markdown("#### Pricing strategy comparison")
-        if comparison is not None:
-            st.dataframe(comparison, use_container_width=True, hide_index=True)
-            strategy = find_col(comparison, ["Pricing Strategy"])
-            avg_price = find_col(comparison, ["Mean Price"])
-            if strategy and avg_price:
-                st.plotly_chart(px.bar(comparison, x=strategy, y=avg_price,
-                    title="Average service price by strategy", template="plotly_dark"),
-                    use_container_width=True)
-        if pricing is not None and selected is not None:
-            p = zone_rows(pricing, selected)
-            base_c = find_col(p, ["service_price"])
-            opt_c = find_col(p, ["optimized_service_price", "dynamic_price"])
-            time_c = find_col(p, ["time"])
-            if base_c and opt_c and not p.empty:
-                st.markdown(f"#### Zone {selected}: pricing record")
-                if time_c:
-                    long = p.melt(id_vars=[time_c], value_vars=[base_c, opt_c],
-                                  var_name="Strategy", value_name="Service price")
-                    st.plotly_chart(px.line(long, x=time_c, y="Service price",
-                        color="Strategy", template="plotly_dark"),
-                        use_container_width=True)
-                st.dataframe(p.head(250), use_container_width=True, hide_index=True)
-        st.caption("The pricing logic is a simulated policy based on congestion, occupancy, relative demand and electricity cost. It is not a live tariff controller.")
-
-    with tab4:
-        st.markdown("#### Price sensitivity scenario explorer")
-        st.write("Adjust the assumed price sensitivity to inspect the precomputed scenarios from the project.")
-        if sensitivity is not None:
-            sens_c = find_col(sensitivity, ["price_sensitivity", "sensitivity"])
-            before_c = find_col(sensitivity, ["congestion_before_pct", "congestion_before", "before_congestion"])
-            after_c = find_col(sensitivity, ["congestion_after_pct", "congestion_after", "after_congestion"])
-            if sens_c:
-                values = sorted(pd.to_numeric(sensitivity[sens_c], errors="coerce").dropna().unique())
-                if values:
-                    chosen = st.select_slider("Assumed price sensitivity", options=values, value=min(values, key=lambda v: abs(v - .5)))
-                    scenario = sensitivity[pd.to_numeric(sensitivity[sens_c], errors="coerce") == chosen]
-                    st.dataframe(scenario, use_container_width=True, hide_index=True)
-            st.dataframe(sensitivity, use_container_width=True, hide_index=True)
-            if sens_c and before_c and after_c:
-                melted = sensitivity.melt(id_vars=[sens_c], value_vars=[before_c, after_c],
-                                          var_name="Measure", value_name="Congestion (%)")
-                st.plotly_chart(px.line(melted, x=sens_c, y="Congestion (%)",
-                    color="Measure", markers=True, template="plotly_dark",
-                    title="Congestion before and after simulated redistribution"),
-                    use_container_width=True)
+elif page == "Model & Scenario Analysis":
+    st.title("Model & Scenario Analysis")
+    st.write("Model metrics are calculated from the supplied prediction records or read from the supplied comparison files.")
+    st.subheader("XGBoost congestion classification")
+    if predictions is not None:
+        actual_col = col(predictions, ["actual_high_occupancy"])
+        pred_col = col(predictions, ["predicted_high_occupancy"])
+        prob_col = col(predictions, ["predicted_congestion_probability"])
+        if actual_col and pred_col:
+            from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score, roc_auc_score
+            valid = predictions[[actual_col, pred_col]].dropna()
+            y_true = num(valid[actual_col]).astype(int)
+            y_pred = num(valid[pred_col]).astype(int)
+            rows = [
+                ("Accuracy", accuracy_score(y_true, y_pred)),
+                ("Precision", precision_score(y_true, y_pred, zero_division=0)),
+                ("Recall", recall_score(y_true, y_pred, zero_division=0)),
+                ("F1-score", f1_score(y_true, y_pred, zero_division=0)),
+            ]
+            if prob_col:
+                auc_data = predictions[[actual_col, prob_col]].dropna()
+                try:
+                    auc = roc_auc_score(auc_data[actual_col].astype(int), num(auc_data[prob_col]))
+                    rows.append(("ROC-AUC", auc))
+                except ValueError:
+                    pass
+            metrics = pd.DataFrame(rows, columns=["Metric", "Value"])
+            st.dataframe(metrics.style.format({"Value": "{:.4f}"}), use_container_width=True, hide_index=True)
         else:
-            st.info("sensitivity_analysis.csv is not available.")
-        st.warning("Scenario outputs are simulations based on assumed customer price sensitivity and zone-capacity rules. They should not be interpreted as observed real-world outcomes.")
+            st.warning("Actual and predicted high-occupancy columns are required to calculate classification metrics.")
+    else:
+        st.warning("Prediction CSV not found; XGBoost metrics cannot be calculated.")
+
+    st.subheader("Residual ST-GNN occupancy forecasting")
+    if stgnn is not None:
+        st.dataframe(stgnn, use_container_width=True, hide_index=True)
+    else:
+        st.info("ST-GNN comparison file is unavailable.")
+
+    if shap_data is not None:
+        feature = col(shap_data, ["feature", "features", "feature_name"])
+        importance = col(shap_data, ["importance", "mean_abs_shap", "shap_importance", "mean_shap_value"])
+        st.subheader("XGBoost feature importance (SHAP)")
+        if feature and importance:
+            plot = shap_data.copy()
+            plot[importance] = num(plot[importance])
+            plot = plot.dropna(subset=[importance]).sort_values(importance, ascending=True)
+            st.plotly_chart(px.bar(plot, x=importance, y=feature, orientation="h",
+                                   title="Mean absolute SHAP feature importance"),
+                            use_container_width=True)
+        else:
+            st.dataframe(shap_data, use_container_width=True, hide_index=True)
+
+    if sensitivity is not None:
+        st.subheader("Price-sensitivity scenarios")
+        st.dataframe(sensitivity, use_container_width=True, hide_index=True)
+        sens = col(sensitivity, ["price_sensitivity"])
+        before = col(sensitivity, ["congestion_before_pct"])
+        after = col(sensitivity, ["congestion_after_pct"])
+        if sens and before and after:
+            long = sensitivity.melt(id_vars=[sens], value_vars=[before, after],
+                                    var_name="Scenario", value_name="Congestion (%)")
+            st.plotly_chart(px.line(long, x=sens, y="Congestion (%)",
+                                    color="Scenario", markers=True),
+                            use_container_width=True)
 
 st.divider()
-st.caption("UrbanEV · Interactive EV charging and network decision-support prototype · Historical UrbanEV Shenzhen data")
-'''
-st.download_button(
-    label="Download Interactive App Code",
-    data=code,
-    file_name="app_user_friendly.py",
-    mime="text/x-python"
-)
+st.caption("UrbanEV Smart Charging Network | Academic capstone | UrbanEV Shenzhen dataset")
