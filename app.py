@@ -1,720 +1,403 @@
 """
-Charge Network - EV charging dashboard.
+EV Charging Network Intelligence Dashboard
+Run: streamlit run app.py
 
-Two experiences in one app:
-  * EV Driver        - pick a zone, check predicted congestion, compare prices,
-                       and get a recommended nearby alternative.
-  * Network Operator - monitor all zones, spot hotspots, and try pricing
-                       sensitivity scenarios.
-
-The forecasting models (XGBoost / ST-GNN) are represented by the exported
-prediction files. They run behind the scenes; the UI only shows outcomes.
-
-Expected data files (in ./data/ or next to app.py):
-  dynamic_pricing_simulation.csv
-  nearest_alternative_zones__1_.csv
-  zone_neighbours.csv
-  final_pricing_comparison__1_.csv
-  sensitivity_analysis__1_.csv
-  residual_stgnn_comparison__1_.csv
-  shap_feature_importance.csv
-Optional:
-  zone_coordinates.csv  (zone_id, latitude, longitude) for a true geographic map
+Place the CSV files in the same GitHub repository/folder as this app.py.
+The app uses supplied prediction/pricing outputs. It can optionally load model
+artifacts later, but does not claim to execute XGBoost/ST-GNN without them.
 """
-
-from __future__ import annotations
 
 from pathlib import Path
-
+import math
 import numpy as np
 import pandas as pd
+import plotly.express as px
 import plotly.graph_objects as go
 import streamlit as st
-from scipy.sparse import csr_matrix
-from scipy.sparse.csgraph import shortest_path
 
-# ---------------------------------------------------------------------------
-# Configuration
-# ---------------------------------------------------------------------------
-st.set_page_config(page_title="Charge Network", page_icon="⚡", layout="wide")
-
-APP_DIR = Path(__file__).resolve().parent
-DATA_SEARCH_DIRS = [APP_DIR / "data", APP_DIR]
-
-FILES = {
-    "pricing": "dynamic_pricing_simulation.csv",
-    "alt": "nearest_alternative_zones__1_.csv",
-    "nb": "zone_neighbours.csv",
-    "final": "final_pricing_comparison__1_.csv",
-    "sens": "sensitivity_analysis__1_.csv",
-    "resid": "residual_stgnn_comparison__1_.csv",
-    "shap": "shap_feature_importance.csv",
-    "coords": "zone_coordinates.csv",
-}
-
-# Palette: dark charcoal base, teal and electric-green accents.
-BG = "#1C2127"
-PANEL = "#20262D"
-CARD = "#262D35"
-BORDER = "#323B45"
-TEXT = "#E8EEF2"
-MUTED = "#8B98A5"
-TEAL = "#14B8A6"
-GREEN = "#3DFF9A"
-AMBER = "#E5C15A"
-ORANGE = "#F59E42"
-CORAL = "#FF5C6C"
-
-RISK_COLOR = {"Low": TEAL, "Moderate": AMBER, "High": ORANGE, "Very High": CORAL}
-CONG_SCALE = [[0.0, TEAL], [0.4, AMBER], [0.6, ORANGE], [1.0, CORAL]]
-
-CROWDED = 0.40  # congestion probability at which a zone counts as busy
-CAPACITY_QUANTILE = 0.95  # "typical capacity" = 95th percentile occupancy per zone
-W_CONGESTION, W_DISTANCE, W_PRICE = 0.5, 0.3, 0.2  # alternative scoring weights
-
-CSS = """
-<style>
-#MainMenu, footer {visibility: hidden;}
-.stApp {background: __BG__;}
-section[data-testid="stSidebar"] {background: __PANEL__; border-right: 1px solid __BORDER__;}
-h1, h2, h3, h4 {color: __TEXT__ !important; letter-spacing: -0.01em;}
-.card {background: __CARD__; border: 1px solid __BORDER__; border-radius: 14px;
-       padding: 14px 16px; margin-bottom: 12px;}
-.card.rec {border-color: __GREEN__; box-shadow: 0 0 0 1px __GREEN__66, 0 0 26px __GREEN__1f;}
-.card .label {color: __MUTED__; font-size: .74rem; text-transform: uppercase; letter-spacing: .07em;}
-.card .value {color: __TEXT__; font-size: 1.7rem; font-weight: 650; line-height: 1.2; margin-top: 2px;}
-.card .sub {color: __MUTED__; font-size: .84rem; margin-top: 3px;}
-.badge {display: inline-block; padding: 1px 9px; border-radius: 999px; font-size: .68rem;
-        font-weight: 700; letter-spacing: .04em; background: __GREEN__; color: #0B1A12;
-        margin-left: 8px; vertical-align: middle; text-transform: uppercase;}
-.hero {color: __MUTED__; font-size: .95rem; margin-top: -8px; margin-bottom: 16px;}
-.note {border-left: 3px solid __TEAL__; background: __CARD__; padding: 10px 14px;
-       border-radius: 8px; color: __TEXT__; margin-bottom: 12px; font-size: .92rem;}
-.note.warn {border-left-color: __CORAL__;}
-div[data-testid="stMetric"] {background: __CARD__; border: 1px solid __BORDER__;
-       border-radius: 14px; padding: 12px 16px;}
-div[data-testid="stMetricLabel"] p {color: __MUTED__;}
-</style>
-"""
-CSS = (
-    CSS.replace("__BG__", BG)
-    .replace("__PANEL__", PANEL)
-    .replace("__CARD__", CARD)
-    .replace("__BORDER__", BORDER)
-    .replace("__TEXT__", TEXT)
-    .replace("__MUTED__", MUTED)
-    .replace("__TEAL__", TEAL)
-    .replace("__GREEN__", GREEN)
-    .replace("__CORAL__", CORAL)
+st.set_page_config(
+    page_title="VoltIQ | EV Charging Intelligence",
+    page_icon="⚡",
+    layout="wide",
+    initial_sidebar_state="expanded",
 )
 
+# ----------------------------- Theme -----------------------------------------
+st.markdown("""
+<style>
+@import url('https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700&family=Space+Grotesk:wght@500;600;700&display=swap');
+:root { --bg:#101719; --panel:#182326; --panel2:#1d2b2e; --teal:#22c7b8; --green:#b7f36b; --muted:#9aadae; }
+html, body, [class*="css"] { font-family:'DM Sans',sans-serif; }
+.stApp { background:linear-gradient(135deg,#0d1517 0%,#111d20 55%,#102322 100%); color:#eef7f5; }
+h1,h2,h3 { font-family:'Space Grotesk',sans-serif !important; color:#f2fbf8; }
+[data-testid="stSidebar"] { background:#111d20; border-right:1px solid #263a3c; }
+[data-testid="stMetric"] { background:#192629; border:1px solid #294144; padding:15px 18px; border-radius:15px; }
+[data-testid="stMetricLabel"] { color:#9aadae !important; }
+[data-testid="stMetricValue"] { color:#f4fffc !important; }
+.stButton>button { background:linear-gradient(90deg,#16a99d,#80d957); color:#071615; border:0; border-radius:10px; font-weight:700; }
+div[data-testid="stTabs"] button { color:#c9d8d6; }
+div[data-testid="stTabs"] button[aria-selected="true"] { color:#72e2d4; border-bottom-color:#22c7b8; }
+div[data-testid="stAlert"] { border-radius:12px; }
+.small-muted { color:#9aadae; font-size:0.88rem; }
+.hero { padding:22px 24px; border:1px solid #294144; border-radius:18px; background:linear-gradient(110deg,#1b3032,#172426); margin-bottom:18px; }
+.pill { display:inline-block; padding:5px 10px; border-radius:20px; background:#183e3a; color:#80eadc; font-size:12px; font-weight:700; }
+</style>
+""", unsafe_allow_html=True)
 
-# ---------------------------------------------------------------------------
-# Data loading
-# ---------------------------------------------------------------------------
-def find(name: str, required: bool = True) -> Path | None:
-    for base in DATA_SEARCH_DIRS:
-        path = base / name
+DATA_DIR = Path(__file__).resolve().parent
+
+FILE_CANDIDATES = {
+    "dynamic": ["dynamic_pricing_simulation.csv"],
+    "pricing": ["final_pricing_comparison.csv", "final_pricing_comparison (1).csv"],
+    "decision": ["intelligent_decision_support.csv"],
+    "alternatives": ["nearest_alternative_zones.csv", "nearest_alternative_zones (1).csv"],
+    "model_comparison": ["residual_stgnn_comparison.csv", "residual_stgnn_comparison (1).csv"],
+    "sensitivity": ["sensitivity_analysis.csv", "sensitivity_analysis (1).csv"],
+    "shap": ["shap_feature_importance.csv"],
+    "predictions": ["spatial_model_test_predictions.csv", "spatial_model_test_predictions (1).csv"],
+}
+
+@st.cache_data(show_spinner=False)
+def load_csv(candidates):
+    for filename in candidates:
+        path = DATA_DIR / filename
         if path.exists():
-            return path
-    if required:
-        raise FileNotFoundError(
-            f"Could not find '{name}'. Place it in a 'data/' folder next to app.py."
-        )
-    return None
+            try:
+                return pd.read_csv(path), filename
+            except Exception as exc:
+                st.warning(f"Could not read {filename}: {exc}")
+    return None, None
 
+def load_data():
+    loaded = {}
+    for key, candidates in FILE_CANDIDATES.items():
+        loaded[key] = load_csv(candidates)
+    return loaded
 
-def risk_of(p: float) -> str:
-    if p >= 0.6:
-        return "Very High"
-    if p >= 0.4:
-        return "High"
-    if p >= 0.2:
-        return "Moderate"
+DATA = load_data()
+
+def df_for(key):
+    return DATA[key][0]
+
+def numeric(series, default=0):
+    return pd.to_numeric(series, errors="coerce").fillna(default)
+
+def fmt_price(value):
+    return f"{float(value):.3f}" if pd.notna(value) else "—"
+
+def risk_label(prob):
+    if prob >= .80: return "Very High"
+    if prob >= .60: return "High"
+    if prob >= .35: return "Moderate"
     return "Low"
 
+def risk_color(prob):
+    if prob >= .80: return "#ff6b6b"
+    if prob >= .60: return "#ffad5c"
+    if prob >= .35: return "#f4d35e"
+    return "#8be28b"
 
-@st.cache_data(show_spinner="Loading zone data…")
-def load_pricing() -> pd.DataFrame:
-    df = pd.read_csv(
-        find(FILES["pricing"]),
-        usecols=[
-            "time",
-            "zone_id",
-            "occupancy",
-            "service_price",
-            "dynamic_price",
-            "price_increase_pct",
-            "predicted_congestion_probability",
-        ],
-    )
-    df["time"] = pd.to_datetime(df["time"])
-    df["zone_id"] = df["zone_id"].astype(int)
-    df = df.rename(columns={"predicted_congestion_probability": "congestion"})
+def latest_snapshot(df, timestamp=None):
+    if df is None or df.empty:
+        return pd.DataFrame()
+    out = df.copy()
+    if "time" in out.columns:
+        out["time"] = pd.to_datetime(out["time"], errors="coerce")
+        times = out["time"].dropna()
+        if timestamp is not None:
+            out = out[out["time"] == pd.Timestamp(timestamp)]
+        elif not times.empty:
+            out = out[out["time"] == times.max()]
+    return out
 
-    capacity = df.groupby("zone_id")["occupancy"].quantile(CAPACITY_QUANTILE).clip(lower=1)
-    df["capacity"] = df["zone_id"].map(capacity)
-    df["load"] = (df["occupancy"] / df["capacity"]).clip(0, 1)
-    df["risk"] = np.select(
-        [df["congestion"] >= 0.6, df["congestion"] >= 0.4, df["congestion"] >= 0.2],
-        ["Very High", "High", "Moderate"],
-        default="Low",
-    )
-    return df.sort_values(["time", "zone_id"]).reset_index(drop=True)
+def get_zone_snapshot(zone_id, timestamp=None):
+    source = df_for("dynamic")
+    if source is None:
+        source = df_for("predictions")
+    snap = latest_snapshot(source, timestamp)
+    if snap.empty:
+        return pd.DataFrame()
+    snap["zone_id"] = numeric(snap["zone_id"]).astype("Int64")
+    return snap[snap["zone_id"] == int(zone_id)].copy()
 
+def get_zone_alternatives(zone_id, timestamp=None):
+    alt = df_for("alternatives")
+    snap = latest_snapshot(df_for("dynamic"), timestamp)
+    if alt is None or snap.empty:
+        return pd.DataFrame()
+    alt = alt.copy()
+    alt["zone_id"] = numeric(alt["zone_id"]).astype("Int64")
+    alt["alternative_zone"] = numeric(alt["alternative_zone"]).astype("Int64")
+    alt = alt[alt["zone_id"] == int(zone_id)].copy()
+    snap["zone_id"] = numeric(snap["zone_id"]).astype("Int64")
+    info = snap[["zone_id", "occupancy", "predicted_congestion_probability",
+                 "service_price", "dynamic_price"]].drop_duplicates("zone_id")
+    info = info.rename(columns={
+        "zone_id": "alternative_zone",
+        "occupancy": "alt_occupancy",
+        "predicted_congestion_probability": "alt_congestion",
+        "service_price": "alt_fixed_price",
+        "dynamic_price": "alt_dynamic_price",
+    })
+    return alt.merge(info, on="alternative_zone", how="left").sort_values("distance_km")
 
-@st.cache_data(show_spinner=False)
-def load_alternatives() -> pd.DataFrame:
-    alt = pd.read_csv(find(FILES["alt"]))
-    return alt.astype({"zone_id": int, "alternative_zone": int})
-
-
-@st.cache_data(show_spinner=False)
-def load_neighbours() -> pd.DataFrame:
-    nb = pd.read_csv(find(FILES["nb"]))
-    return nb.astype({"zone_id": int, "neighbour_zone_id": int})
-
-
-def _mds_layout(zone_ids: tuple, nb: pd.DataFrame) -> pd.DataFrame:
-    """Classical multidimensional scaling on graph shortest-path distances.
-
-    The dataset has no coordinates, so this places zones on a 2D map where
-    nearby zones (by neighbour distance) appear close together.
-    """
-    idx = {z: i for i, z in enumerate(zone_ids)}
-    n = len(zone_ids)
-    rows = nb["zone_id"].map(idx)
-    cols = nb["neighbour_zone_id"].map(idx)
-    ok = rows.notna() & cols.notna()
-    r = rows[ok].astype(int).to_numpy()
-    c = cols[ok].astype(int).to_numpy()
-    w = nb.loc[ok, "distance_km"].to_numpy() + 1e-6
-
-    graph = csr_matrix((w, (r, c)), shape=(n, n))
-    dist = shortest_path(graph, directed=False)
-    finite = dist[np.isfinite(dist)]
-    dist[~np.isfinite(dist)] = finite.max() * 1.2 if finite.size else 1.0
-    np.fill_diagonal(dist, 0.0)
-
-    j = np.eye(n) - np.ones((n, n)) / n
-    b = -0.5 * j @ (dist ** 2) @ j
-    vals, vecs = np.linalg.eigh(b)
-    top = np.argsort(vals)[::-1][:2]
-    xy = vecs[:, top] * np.sqrt(np.clip(vals[top], 1e-9, None))
-    return pd.DataFrame({"x": xy[:, 0], "y": xy[:, 1]}, index=list(zone_ids))
-
-
-@st.cache_data(show_spinner=False)
-def load_layout(zone_ids: tuple) -> tuple[pd.DataFrame, str]:
-    coords_path = find(FILES["coords"], required=False)
-    if coords_path is not None:
-        coords = pd.read_csv(coords_path)
-        coords["zone_id"] = coords["zone_id"].astype(int)
-        coords = coords.set_index("zone_id")
-        pos = pd.DataFrame(
-            {"x": coords["longitude"], "y": coords["latitude"]}
-        ).reindex(list(zone_ids))
-        if pos.notna().all().all():
-            return pos, "Map uses real zone coordinates."
-    pos = _mds_layout(zone_ids, load_neighbours())
-    return pos, "Map layout is approximate, derived from distances between neighbouring zones."
-
-
-@st.cache_data(show_spinner=False)
-def load_final_pricing() -> pd.DataFrame:
-    return pd.read_csv(find(FILES["final"])).set_index("Pricing Strategy")
-
-
-@st.cache_data(show_spinner=False)
-def load_sensitivity() -> pd.DataFrame:
-    return pd.read_csv(find(FILES["sens"])).sort_values("Price Sensitivity").reset_index(drop=True)
-
-
-@st.cache_data(show_spinner=False)
-def load_model_info():
-    resid = pd.read_csv(find(FILES["resid"]), index_col=0)
-    shap = pd.read_csv(find(FILES["shap"]))
-    return resid, shap
-
-
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
-def snapshot(df: pd.DataFrame, t: pd.Timestamp) -> pd.DataFrame:
-    return df.loc[df["time"] == t].set_index("zone_id").sort_index()
-
-
-def zone_label(z: int) -> str:
-    return f"Zone {z}"
-
-
-def action_for(pct: float) -> str:
-    return "Hold price" if pct <= 0 else f"Raise price {pct * 100:.0f}%"
-
-
-def card(label, value, sub="", accent=None, rec=False, badge=""):
-    style = f' style="border-left:3px solid {accent}"' if accent else ""
-    cls = "card rec" if rec else "card"
-    badge_html = f'<span class="badge">{badge}</span>' if badge else ""
-    st.markdown(
-        f'<div class="{cls}"{style}><div class="label">{label}{badge_html}</div>'
-        f'<div class="value">{value}</div><div class="sub">{sub}</div></div>',
-        unsafe_allow_html=True,
-    )
-
-
-def note(text: str, warn: bool = False):
-    cls = "note warn" if warn else "note"
-    st.markdown(f'<div class="{cls}">{text}</div>', unsafe_allow_html=True)
-
-
-def style_fig(fig: go.Figure, height: int = 300) -> go.Figure:
-    fig.update_layout(
-        template="plotly_dark",
-        height=height,
-        margin=dict(l=10, r=10, t=36, b=10),
-        paper_bgcolor="rgba(0,0,0,0)",
-        plot_bgcolor="rgba(0,0,0,0)",
-        legend=dict(orientation="h", y=1.14, x=0),
-        font=dict(color=MUTED),
-    )
-    fig.update_xaxes(gridcolor=BORDER)
-    fig.update_yaxes(gridcolor=BORDER)
-    return fig
-
-
-def candidates(zone: int, snap: pd.DataFrame, alt: pd.DataFrame) -> pd.DataFrame:
-    """Nearby alternatives scored on congestion (lower is better), distance and price."""
-    c = alt.loc[alt["zone_id"] == zone].sort_values("distance_km").head(8).copy()
-    c = c[c["alternative_zone"].isin(snap.index)].reset_index(drop=True)
-    if c.empty:
-        return c
-    c["congestion"] = c["alternative_zone"].map(snap["congestion"])
-    c["price"] = c["alternative_zone"].map(snap["dynamic_price"])
-    c["vehicles"] = c["alternative_zone"].map(snap["occupancy"])
-    c["risk"] = c["congestion"].map(risk_of)
-
-    d_span = c["distance_km"].max() or 1.0
-    p_min, p_max = c["price"].min(), c["price"].max()
-    p_norm = (c["price"] - p_min) / (p_max - p_min) if p_max > p_min else 0.0
-    c["score"] = (
-        W_CONGESTION * c["congestion"]
-        + W_DISTANCE * c["distance_km"] / d_span
-        + W_PRICE * p_norm
-    )
-    return c.sort_values("score").reset_index(drop=True)
-
-
-def on_map_click():
-    """Callback: when a zone is clicked on the driver map, select it."""
-    try:
-        state = st.session_state.get("map_chart") or {}
-        points = (state.get("selection") or {}).get("points") or []
-        if points and points[0].get("customdata") is not None:
-            cd = points[0]["customdata"]
-            zid = cd[0] if isinstance(cd, (list, tuple, np.ndarray)) else cd
-            st.session_state["zone_pick"] = int(zid)
-    except Exception:
-        pass
-
-
-def zone_map(pos, snap, selected, alt_ids, operator: bool) -> go.Figure:
-    p = pos.loc[snap.index]
-    hover = [
-        f"<b>Zone {z}</b><br>Congestion {c * 100:.0f}% · {r}<br>Vehicles {int(o)}"
-        for z, c, r, o in zip(snap.index, snap.congestion, snap.risk, snap.occupancy)
-    ]
+def build_network_figure(zone_id, alternatives):
+    """A schematic network diagram, not a geographic map (source CSVs lack coordinates)."""
+    nodes = [int(zone_id)]
+    if not alternatives.empty:
+        nodes += [int(x) for x in alternatives["alternative_zone"].dropna().head(7).tolist()]
+    n = len(nodes)
+    angles = np.linspace(0, 2 * np.pi, max(n, 2), endpoint=False)
+    coords = {node: (math.cos(a), math.sin(a)) for node, a in zip(nodes, angles)}
     fig = go.Figure()
-    fig.add_trace(
-        go.Scatter(
-            x=p["x"],
-            y=p["y"],
-            mode="markers",
-            customdata=snap.index.values,
-            hovertext=hover,
-            hovertemplate="%{hovertext}<extra></extra>",
-            marker=dict(
-                size=10 + 14 * snap["load"].values,
-                color=snap["congestion"].values,
-                colorscale=CONG_SCALE,
-                cmin=0,
-                cmax=1,
-                opacity=0.92,
-                showscale=operator,
-                colorbar=dict(
-                    title="Congestion",
-                    tickformat=".0%",
-                    thickness=10,
-                    len=0.6,
-                    bgcolor="rgba(0,0,0,0)",
-                ),
-            ),
-            showlegend=False,
-        )
-    )
-    if alt_ids:
-        a = p.loc[[z for z in alt_ids if z in p.index]]
-        fig.add_trace(
-            go.Scatter(
-                x=a["x"],
-                y=a["y"],
-                mode="markers",
-                customdata=a.index.values,
-                hoverinfo="skip",
-                marker=dict(size=26, color="rgba(0,0,0,0)", line=dict(color=GREEN, width=2.5)),
-                showlegend=False,
-            )
-        )
-    if selected is not None and selected in p.index:
-        s = p.loc[[selected]]
-        fig.add_trace(
-            go.Scatter(
-                x=s["x"],
-                y=s["y"],
-                mode="markers",
-                customdata=s.index.values,
-                hoverinfo="skip",
-                marker=dict(size=32, color="rgba(0,0,0,0)", line=dict(color="#FFFFFF", width=2)),
-                showlegend=False,
-            )
-        )
-    fig.update_layout(
-        template="plotly_dark",
-        height=460,
-        margin=dict(l=0, r=0, t=10, b=0),
-        paper_bgcolor="rgba(0,0,0,0)",
-        plot_bgcolor="rgba(0,0,0,0)",
-        hoverlabel=dict(bgcolor=CARD, font_color=TEXT),
-        dragmode="pan",
-        xaxis=dict(visible=False),
-        yaxis=dict(visible=False, scaleanchor="x"),
-    )
+    for _, row in alternatives.head(7).iterrows():
+        target = int(row["alternative_zone"])
+        if target in coords:
+            x0, y0 = coords[int(zone_id)]
+            x1, y1 = coords[target]
+            fig.add_trace(go.Scatter(x=[x0, x1], y=[y0, y1], mode="lines",
+                line=dict(color="#365456", width=1.5), hoverinfo="skip", showlegend=False))
+    snap = get_zone_snapshot(zone_id)
+    prob = float(snap["predicted_congestion_probability"].iloc[0]) if not snap.empty else 0
+    colors = ["#ff6b6b" if node == int(zone_id) and prob >= .6 else
+              "#22c7b8" if node == int(zone_id) else "#b7f36b" for node in nodes]
+    labels = ["Selected" if node == int(zone_id) else f"Zone {node}" for node in nodes]
+    fig.add_trace(go.Scatter(
+        x=[coords[node][0] for node in nodes], y=[coords[node][1] for node in nodes],
+        mode="markers+text", text=labels, textposition="bottom center",
+        marker=dict(size=[28 if node == int(zone_id) else 19 for node in nodes],
+                    color=colors, line=dict(color="#eafff8", width=1)),
+        customdata=nodes, hovertemplate="Zone %{customdata}<extra></extra>",
+        showlegend=False
+    ))
+    fig.update_layout(height=340, margin=dict(l=5,r=5,t=10,b=25),
+        paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
+        xaxis=dict(visible=False), yaxis=dict(visible=False, scaleanchor="x"),
+        annotations=[dict(text="Network relationship view · not to geographic scale",
+                          x=.5,y=1.04,xref="paper",yref="paper",showarrow=False,
+                          font=dict(color="#91aaa8",size=11))])
     return fig
 
+# ----------------------------- Header ----------------------------------------
+st.markdown("""
+<div class="hero">
+  <div class="pill">EV CHARGING NETWORK INTELLIGENCE</div>
+  <h1 style="margin:10px 0 4px 0;">VoltIQ <span style="color:#22c7b8;">/</span> Charging, made smarter.</h1>
+  <div class="small-muted">Find available charging zones, compare prices and understand network demand.</div>
+</div>
+""", unsafe_allow_html=True)
 
-# ---------------------------------------------------------------------------
-# EV Driver experience
-# ---------------------------------------------------------------------------
-def render_alternatives(c: pd.DataFrame):
-    good = c[c["congestion"] < CROWDED]
-    best = good.iloc[0] if len(good) else c.iloc[0]
-    if len(good):
-        lead = "Picked for the best balance of low congestion, short distance and fair price."
-    else:
-        lead = "All nearby zones are busy too. This is the least congested option."
+missing = [key for key, (df, _) in DATA.items() if df is None]
+if missing:
+    st.error("Some data files are missing: " + ", ".join(missing) +
+             ". Add the uploaded CSVs beside app.py in your GitHub repository.")
+    st.stop()
 
-    st.markdown("#### Recommended alternative")
-    card(
-        "Best option nearby",
-        f"Zone {int(best['alternative_zone'])}",
-        f"{best['distance_km']:.1f} km away · congestion {best['congestion'] * 100:.0f}% · "
-        f"price {best['price']:.2f}<br>{lead}",
-        accent=RISK_COLOR[best["risk"]],
-        rec=True,
-        badge="Recommended",
-    )
+dynamic = df_for("dynamic").copy()
+dynamic["time"] = pd.to_datetime(dynamic["time"], errors="coerce")
+dynamic["zone_id"] = numeric(dynamic["zone_id"]).astype(int)
+all_times = sorted(dynamic["time"].dropna().unique())
+all_zones = sorted(dynamic["zone_id"].unique())
 
-    others = c[c["alternative_zone"] != best["alternative_zone"]].head(3)
-    if not others.empty:
-        st.markdown("#### Other nearby zones")
-        cols = st.columns(len(others))
-        for col, (_, r) in zip(cols, others.iterrows()):
-            with col:
-                card(
-                    f"Zone {int(r['alternative_zone'])}",
-                    f"{r['distance_km']:.1f} km",
-                    f"Congestion {r['congestion'] * 100:.0f}%<br>Price {r['price']:.2f}",
-                    accent=RISK_COLOR[r["risk"]],
-                )
+# Sidebar navigation and global controls
+with st.sidebar:
+    st.markdown("## ⚡ VoltIQ")
+    st.caption("Charging network console")
+    experience = st.radio("Choose experience", ["EV Driver", "Network Operator"])
+    st.divider()
+    st.markdown("**Network snapshot**")
+    default_time = all_times[-1] if all_times else None
+    selected_time = st.select_slider(
+        "Historical time",
+        options=all_times,
+        value=default_time,
+        format_func=lambda x: pd.Timestamp(x).strftime("%d %b %Y · %H:%M")
+    ) if all_times else None
+    st.caption("The dataset covers Jan–Feb 2023. This selector changes the displayed historical snapshot.")
+    st.divider()
+    st.caption("Data-powered demo · price values shown in the units provided by the source data")
 
+snapshot = latest_snapshot(dynamic, selected_time)
+snapshot["zone_id"] = numeric(snapshot["zone_id"]).astype(int)
+decision = latest_snapshot(df_for("decision"), selected_time)
+if not decision.empty:
+    decision["zone_id"] = numeric(decision["zone_id"]).astype(int)
 
-def render_driver(df: pd.DataFrame, t: pd.Timestamp, pos, alt: pd.DataFrame, layout_note: str):
-    snap = snapshot(df, t)
-    zones = snap.index.tolist()
-    if st.session_state.get("zone_pick") not in zones:
-        st.session_state["zone_pick"] = zones[0]
-    zone = int(st.session_state["zone_pick"])
-    row = snap.loc[zone]
-    crowded = row["congestion"] >= CROWDED
-    cands = candidates(zone, snap, alt)
-
-    st.markdown("# Find a charge")
-    st.markdown(
-        f'<div class="hero">Predictions for {t:%A %d %b, %H:%M}. Pick a zone to check '
-        f"availability, compare prices and find a better option nearby.</div>",
-        unsafe_allow_html=True,
-    )
-
-    left, right = st.columns([1.55, 1], gap="large")
-
+# ----------------------------- DRIVER ----------------------------------------
+if experience == "EV Driver":
+    st.subheader("EV Driver")
+    st.write("Choose a charging zone to check its current recorded occupancy, predicted congestion and price.")
+    left, right = st.columns([1, 2])
     with left:
-        st.caption("Click a zone on the map, or choose one below.")
-        alt_ids = cands["alternative_zone"].tolist() if (crowded and not cands.empty) else None
-        st.plotly_chart(
-            zone_map(pos, snap, zone, alt_ids, operator=False),
-            use_container_width=True,
-            key="map_chart",
-            on_select=on_map_click,
-            selection_mode="points",
-            config={"displayModeBar": False},
-        )
-        st.selectbox("Zone", zones, key="zone_pick", format_func=zone_label)
-        if alt_ids:
-            st.caption("Green rings mark nearby alternatives.")
-
+        selected_zone = st.selectbox("Select charging zone", all_zones, index=0)
+        zone_rows = snapshot[snapshot["zone_id"] == selected_zone]
+        if zone_rows.empty:
+            st.warning("No record for this zone at the selected time.")
+            st.stop()
+        z = zone_rows.iloc[0]
+        st.markdown("**Selected zone status**")
+        prob = float(z["predicted_congestion_probability"])
+        st.markdown(f"<span class='pill' style='background:{risk_color(prob)}22;color:{risk_color(prob)}'>{risk_label(prob)} congestion risk</span>", unsafe_allow_html=True)
+        st.metric("Predicted congestion", f"{prob*100:.1f}%")
+        st.metric("Recorded occupancy", f"{float(z['occupancy']):,.0f}")
+        st.metric("Dynamic service price", fmt_price(z.get("dynamic_price", np.nan)))
+        st.metric("Fixed service price", fmt_price(z.get("service_price", np.nan)))
     with right:
-        st.subheader(zone_label(zone))
-        if crowded:
-            note("This zone is likely to be busy during this hour. Nearby options are shown below.", warn=True)
-        else:
-            note("Looks clear. A good time to charge here.")
+        st.markdown("#### Nearby charging network")
+        alternatives = get_zone_alternatives(selected_zone, selected_time)
+        st.plotly_chart(build_network_figure(selected_zone, alternatives), use_container_width=True, config={"displayModeBar": False})
+        st.caption("A schematic of connected alternatives. Exact map pins are not available because latitude/longitude fields are not present in the uploaded files.")
 
-        card(
-            "Vehicles in zone",
-            f"{int(row['occupancy'])}",
-            f"About {row['load'] * 100:.0f}% of typical capacity",
-            accent=RISK_COLOR[row["risk"]],
-        )
-        card(
-            "Predicted congestion",
-            f"{row['congestion'] * 100:.0f}%",
-            f"{row['risk']} risk this hour",
-            accent=RISK_COLOR[row["risk"]],
-        )
-        surge = (
-            f"Fixed {row['service_price']:.2f} · +{row['price_increase_pct'] * 100:.0f}% surge"
-            if row["price_increase_pct"] > 0
-            else f"Fixed {row['service_price']:.2f} · no surge"
-        )
-        card("Price right now", f"{row['dynamic_price']:.2f}", surge)
-
-    st.divider()
-
-    st.markdown("### Nearby alternatives")
-    if cands.empty:
-        st.info("No alternative zones are on record for this zone.")
-    elif crowded:
-        render_alternatives(cands)
+    st.markdown("### Better nearby alternatives")
+    alternatives = get_zone_alternatives(selected_zone, selected_time)
+    if alternatives.empty:
+        st.info("No alternative-zone records are available for this selection.")
     else:
-        st.caption("No need to move. This zone is comfortable right now.")
-        with st.expander("Show nearby zones anyway"):
-            render_alternatives(cands)
+        alternatives = alternatives.dropna(subset=["distance_km"])
+        alternatives["alt_congestion"] = numeric(alternatives["alt_congestion"], 1)
+        alternatives["alt_dynamic_price"] = numeric(alternatives["alt_dynamic_price"], np.nan)
+        alternatives["alt_fixed_price"] = numeric(alternatives["alt_fixed_price"], np.nan)
+        # Transparent multi-factor ranking: normalized congestion, distance and dynamic price.
+        def minmax(s):
+            s = numeric(s, 0)
+            span = s.max() - s.min()
+            return (s - s.min()) / span if span > 0 else pd.Series(0.0, index=s.index)
+        alternatives["recommendation_score"] = (
+            0.55 * (1 - alternatives["alt_congestion"].clip(0,1)) +
+            0.25 * (1 - minmax(alternatives["distance_km"])) +
+            0.20 * (1 - minmax(alternatives["alt_dynamic_price"]))
+        )
+        alternatives = alternatives.sort_values("recommendation_score", ascending=False)
+        best = alternatives.iloc[0]
+        st.success(f"Recommended alternative: Zone {int(best['alternative_zone'])} · "
+                   f"{best['distance_km']:.2f} km away · "
+                   f"{risk_label(float(best['alt_congestion']))} congestion risk.")
+        display = alternatives.head(8).copy()
+        display["Zone"] = display["alternative_zone"].astype(int).map(lambda x: f"Zone {x}")
+        display["Distance"] = display["distance_km"].map(lambda x: f"{x:.2f} km")
+        display["Congestion risk"] = display["alt_congestion"].map(lambda x: risk_label(float(x)))
+        display["Fixed price"] = display["alt_fixed_price"].map(fmt_price)
+        display["Dynamic price"] = display["alt_dynamic_price"].map(fmt_price)
+        st.dataframe(display[["Zone","Distance","Congestion risk","Fixed price","Dynamic price"]],
+                     use_container_width=True, hide_index=True)
+        st.caption("Recommendation ranking weights: congestion 55%, distance 25%, dynamic price 20%. Scores are normalized within the available alternatives for this selected zone.")
 
-    st.divider()
+    st.markdown("### Price comparison")
+    price_cols = st.columns(2)
+    with price_cols[0]:
+        st.metric("Fixed price", fmt_price(z.get("service_price", np.nan)))
+    with price_cols[1]:
+        st.metric("Optimised dynamic price", fmt_price(z.get("dynamic_price", np.nan)),
+                  delta=f"{(float(z.get('dynamic_price',0))-float(z.get('service_price',0))):+.3f}")
+    st.caption("Prices are shown in the same units as the supplied dataset; no currency is specified in the source files.")
 
-    st.markdown("### Price and availability over the next 24 hours")
-    horizon = df[(df["zone_id"] == zone) & (df["time"] >= t) & (df["time"] < t + pd.Timedelta(hours=24))]
-    if horizon.empty:
-        st.caption("No forecast beyond the end of the data.")
-        return
+# ----------------------------- OPERATOR --------------------------------------
+else:
+    st.subheader("Network Operator")
+    st.write("Monitor demand across all charging zones, identify hotspots and test pricing sensitivity.")
+    avg_occ = float(snapshot["occupancy"].mean())
+    avg_prob = float(snapshot["predicted_congestion_probability"].mean())
+    high_risk = int((snapshot["predicted_congestion_probability"] >= .6).sum())
+    avg_price = float(snapshot["dynamic_price"].mean())
+    k1,k2,k3,k4 = st.columns(4)
+    k1.metric("Active zones", f"{snapshot['zone_id'].nunique():,}")
+    k2.metric("Average occupancy", f"{avg_occ:,.1f}")
+    k3.metric("High-risk zones", f"{high_risk:,}")
+    k4.metric("Average dynamic price", fmt_price(avg_price))
 
-    c1, c2 = st.columns(2, gap="large")
+    st.markdown("### Network congestion overview")
+    c1,c2 = st.columns([1.4,1])
     with c1:
-        fig = go.Figure()
-        fig.add_scatter(
-            x=horizon["time"], y=horizon["service_price"], name="Fixed price",
-            line=dict(color=MUTED, dash="dot", width=2),
-        )
-        fig.add_scatter(
-            x=horizon["time"], y=horizon["dynamic_price"], name="Dynamic price",
-            line=dict(color=GREEN, width=3),
-        )
-        st.plotly_chart(style_fig(fig), use_container_width=True, config={"displayModeBar": False})
+        chart_df = snapshot.sort_values("predicted_congestion_probability", ascending=False).head(20).copy()
+        chart_df["Zone"] = chart_df["zone_id"].astype(str)
+        fig = px.bar(chart_df, x="Zone", y="predicted_congestion_probability",
+                     color="predicted_congestion_probability",
+                     color_continuous_scale=["#22c7b8","#f4d35e","#ff6b6b"],
+                     labels={"predicted_congestion_probability":"Congestion probability"})
+        fig.update_layout(height=360, paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
+                          font_color="#dce9e6", coloraxis_showscale=False,
+                          margin=dict(l=5,r=5,t=15,b=5))
+        st.plotly_chart(fig, use_container_width=True)
     with c2:
-        fig = go.Figure()
-        fig.add_scatter(
-            x=horizon["time"], y=horizon["congestion"], name="Predicted congestion",
-            line=dict(color=TEAL, width=3), fill="tozeroy", fillcolor="rgba(20,184,166,0.15)",
-        )
-        fig.add_hline(
-            y=CROWDED, line_dash="dash", line_color=CORAL,
-            annotation_text="Busy threshold", annotation_font_color=CORAL,
-        )
-        fig.update_yaxes(tickformat=".0%", range=[0, 1])
-        st.plotly_chart(style_fig(fig), use_container_width=True, config={"displayModeBar": False})
+        risk_counts = pd.Series({
+            "Low": int((snapshot["predicted_congestion_probability"] < .35).sum()),
+            "Moderate": int(((snapshot["predicted_congestion_probability"] >= .35) & (snapshot["predicted_congestion_probability"] < .6)).sum()),
+            "High": int(((snapshot["predicted_congestion_probability"] >= .6) & (snapshot["predicted_congestion_probability"] < .8)).sum()),
+            "Very High": int((snapshot["predicted_congestion_probability"] >= .8).sum()),
+        }).reset_index()
+        risk_counts.columns = ["Risk level","Zones"]
+        fig2 = px.pie(risk_counts, names="Risk level", values="Zones", hole=.62,
+                      color="Risk level",
+                      color_discrete_map={"Low":"#8be28b","Moderate":"#f4d35e","High":"#ffad5c","Very High":"#ff6b6b"})
+        fig2.update_layout(height=360, paper_bgcolor="rgba(0,0,0,0)", font_color="#dce9e6",
+                           margin=dict(l=5,r=5,t=15,b=5), legend_title_text="")
+        st.plotly_chart(fig2, use_container_width=True)
 
-    st.caption(
-        "Dynamic prices rise during busy periods, by up to 15% at very high congestion. "
-        + layout_note
-    )
+    st.markdown("### Zone operations")
+    operator_zone = st.selectbox("Inspect a zone", all_zones, key="operator_zone")
+    oz = snapshot[snapshot["zone_id"] == operator_zone].iloc[0]
+    op1,op2,op3 = st.columns(3)
+    op1.metric("Congestion probability", f"{float(oz['predicted_congestion_probability'])*100:.1f}%")
+    op2.metric("Occupancy", f"{float(oz['occupancy']):,.0f}")
+    op3.metric("Dynamic price", fmt_price(oz["dynamic_price"]))
+    if not decision.empty:
+        drow = decision[decision["zone_id"] == operator_zone]
+        if not drow.empty:
+            st.info(f"Suggested operational response: **{drow.iloc[0].get('operational_response','Review zone demand')}**  \n"
+                    f"Recommended action: {drow.iloc[0].get('recommended_action','Review pricing')}")
+    st.markdown("### Pricing sensitivity simulator")
+    sens = df_for("sensitivity").copy()
+    sens["Price Sensitivity"] = numeric(sens["Price Sensitivity"])
+    available_sens = sorted(sens["Price Sensitivity"].dropna().unique())
+    selected_sensitivity = st.slider("Pricing sensitivity", min_value=0.0, max_value=1.0,
+                                     value=0.5, step=0.05,
+                                     help="Scenario control interpolates the uploaded sensitivity-analysis results.")
+    # Interpolate between the scenario rows provided in the CSV.
+    sens_sorted = sens.sort_values("Price Sensitivity")
+    x = sens_sorted["Price Sensitivity"].to_numpy(dtype=float)
+    def interpolate(column):
+        y = numeric(sens_sorted[column]).to_numpy(dtype=float)
+        return float(np.interp(selected_sensitivity, x, y))
+    before = interpolate("Congestion Before (%)")
+    after = interpolate("Congestion After (%)")
+    reduction = interpolate("Congestion Reduction (pp)")
+    shift = interpolate("Demand Shift (%)")
+    transferred = interpolate("Transferred Demand")
+    s1,s2,s3,s4 = st.columns(4)
+    s1.metric("Congestion before", f"{before:.2f}%")
+    s2.metric("Simulated after", f"{after:.2f}%", delta=f"-{reduction:.3f} pp")
+    s3.metric("Demand shifted", f"{shift:.2f}%")
+    s4.metric("Transferred demand", f"{transferred:,.0f}")
+    scen = pd.DataFrame({"Stage":["Before pricing response","After pricing response"],
+                         "Congestion (%)":[before,after]})
+    sf = px.bar(scen, x="Stage", y="Congestion (%)", color="Stage",
+                color_discrete_sequence=["#22c7b8","#b7f36b"], text_auto=".2f")
+    sf.update_layout(showlegend=False, height=280, paper_bgcolor="rgba(0,0,0,0)",
+                     plot_bgcolor="rgba(0,0,0,0)", font_color="#dce9e6",
+                     margin=dict(l=5,r=5,t=15,b=5))
+    st.plotly_chart(sf, use_container_width=True)
+    st.caption("This is an interpolation of the three precomputed scenarios in sensitivity_analysis.csv (0.2, 0.5 and 0.8), not a live retraining or inference call to an ML model.")
 
+    with st.expander("Model and decision-support diagnostics"):
+        st.markdown("**Feature importance (SHAP)**")
+        shap = df_for("shap").copy()
+        shap["Mean_Absolute_SHAP"] = numeric(shap["Mean_Absolute_SHAP"])
+        shap = shap.sort_values("Mean_Absolute_SHAP", ascending=True).tail(15)
+        f = px.bar(shap, x="Mean_Absolute_SHAP", y="Feature", orientation="h",
+                   color_discrete_sequence=["#22c7b8"])
+        f.update_layout(height=420, paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
+                        font_color="#dce9e6", margin=dict(l=5,r=5,t=10,b=5))
+        st.plotly_chart(f, use_container_width=True)
+        st.markdown("**ST-GNN comparison file**")
+        comp = df_for("model_comparison")
+        st.dataframe(comp, use_container_width=True, hide_index=True)
+        st.caption("The uploaded comparison CSV reports evaluation metrics only; it is not a serialized ST-GNN model.")
 
-# ---------------------------------------------------------------------------
-# Network Operator experience
-# ---------------------------------------------------------------------------
-def render_operator(df, t, pos, final, sens, resid, shap, layout_note):
-    snap = snapshot(df, t)
-    at_risk = snap[snap["congestion"] >= CROWDED]
-
-    st.markdown("# Network operations")
-    st.markdown(
-        f'<div class="hero">Live view for {t:%A %d %b, %H:%M}. Monitor zones, spot hotspots '
-        f"and test pricing strategies.</div>",
-        unsafe_allow_html=True,
-    )
-
-    k1, k2, k3, k4 = st.columns(4)
-    with k1:
-        card("Zones monitored", f"{len(snap)}", "Across the network")
-    with k2:
-        card("Zones at risk", f"{len(at_risk)}", "High or very high congestion",
-             accent=CORAL if len(at_risk) else TEAL)
-    with k3:
-        card("Average congestion", f"{snap['congestion'].mean() * 100:.0f}%", "Network-wide, this hour")
-    with k4:
-        card("Average surge", f"{snap['price_increase_pct'].mean() * 100:.1f}%",
-             "Applied across all zones")
-
-    map_col, hot_col = st.columns([1.4, 1], gap="large")
-    with map_col:
-        st.subheader("Congestion map")
-        st.plotly_chart(
-            zone_map(pos, snap, None, None, operator=True),
-            use_container_width=True,
-            config={"displayModeBar": False},
-        )
-        st.caption(layout_note)
-    with hot_col:
-        st.subheader("Hotspots")
-        hs = snap.sort_values("congestion", ascending=False).head(10).reset_index()
-        hs_df = pd.DataFrame(
-            {
-                "Zone": hs["zone_id"].map(zone_label),
-                "Vehicles": hs["occupancy"].astype(int),
-                "Congestion": hs["congestion"] * 100,
-                "Price now": hs["dynamic_price"].round(2),
-                "Action": hs["price_increase_pct"].map(action_for),
-            }
-        )
-        st.dataframe(
-            hs_df,
-            hide_index=True,
-            use_container_width=True,
-            column_config={
-                "Congestion": st.column_config.ProgressColumn(
-                    "Congestion", min_value=0, max_value=100, format="%.0f%%"
-                ),
-            },
-        )
-
-    st.divider()
-
-    st.subheader("Pricing strategy")
-    fixed = final.loc["Fixed Pricing"]
-    dyn = final.loc["Dynamic Pricing"]
-    p1, p2, p3 = st.columns(3)
-    with p1:
-        st.metric("Average price, fixed", f"{fixed['Mean Price']:.2f}")
-    with p2:
-        st.metric(
-            "Average price, dynamic",
-            f"{dyn['Mean Price']:.2f}",
-            f"{(dyn['Mean Price'] / fixed['Mean Price'] - 1) * 100:+.1f}% vs fixed",
-        )
-    with p3:
-        st.metric(
-            "Peak price, dynamic",
-            f"{dyn['Maximum Price']:.2f}",
-            f"{(dyn['Maximum Price'] / fixed['Maximum Price'] - 1) * 100:+.1f}% vs fixed",
-        )
-    if "Advanced Dynamic Pricing (Model 2)" in final.index:
-        adv = final.loc["Advanced Dynamic Pricing (Model 2)"]
-        st.caption(
-            f"Advanced dynamic pricing (Model 2) averages {adv['Mean Price']:.2f} "
-            f"with a peak of {adv['Maximum Price']:.2f}, a small further gain over standard dynamic pricing."
-        )
-
-    st.divider()
-
-    st.subheader("Try a pricing scenario")
-    st.caption(
-        "Price sensitivity is how strongly drivers respond to price changes. "
-        "Higher sensitivity moves more demand from busy zones to quieter ones."
-    )
-    levels = sens["Price Sensitivity"].tolist()
-    chosen = st.select_slider(
-        "Price sensitivity",
-        options=levels,
-        value=levels[len(levels) // 2],
-        key="sens_pick",
-    )
-    r = sens.loc[sens["Price Sensitivity"] == chosen].iloc[0]
-
-    s1, s2, s3 = st.columns(3)
-    with s1:
-        card("Congestion before", f"{r['Congestion Before (%)']:.2f}%", "Network average")
-    with s2:
-        card("Congestion after", f"{r['Congestion After (%)']:.2f}%",
-             f"{r['Congestion Reduction (pp)']:.2f} points lower", accent=GREEN)
-    with s3:
-        conserved = "Demand conserved" if bool(r["Demand Conserved"]) else "Demand changed"
-        card("Demand moved", f"{r['Demand Shift (%)']:.1f}%", conserved)
-
-    fig = go.Figure()
-    labels = [str(v) for v in sens["Price Sensitivity"]]
-    fig.add_bar(name="Before", x=labels, y=sens["Congestion Before (%)"], marker_color=MUTED)
-    fig.add_bar(name="After", x=labels, y=sens["Congestion After (%)"], marker_color=GREEN)
-    fig.update_layout(barmode="group", xaxis_title="Price sensitivity", yaxis_title="Congestion (%)")
-    st.plotly_chart(style_fig(fig, 300), use_container_width=True, config={"displayModeBar": False})
-
-    st.divider()
-
-    with st.expander("How the forecasts work (for analysts)"):
-        st.write(
-            "Congestion probabilities come from the forecasting models and drive the surge rules: "
-            "Moderate adds 5%, High adds 10%, and Very High adds 15%. The main screens show outcomes "
-            "only, so model scores live here."
-        )
-        top = shap.head(8).iloc[::-1]
-        fig = go.Figure(go.Bar(x=top["Mean_Absolute_SHAP"], y=top["Feature"], orientation="h",
-                               marker_color=TEAL))
-        fig.update_layout(xaxis_title="Mean absolute SHAP value", title="Top features driving predictions")
-        st.plotly_chart(style_fig(fig, 320), use_container_width=True, config={"displayModeBar": False})
-
-        st.markdown("**Model comparison on held-out data**")
-        st.dataframe(resid.round(3), use_container_width=True)
-        st.caption(
-            "The residual ST-GNN gives the lowest RMSE and highest R². The persistence baseline "
-            "has the lowest MAE. Both results are shown so the trade-off is visible."
-        )
-
-
-# ---------------------------------------------------------------------------
-# App shell
-# ---------------------------------------------------------------------------
-def main():
-    st.markdown(CSS, unsafe_allow_html=True)
-
-    df = load_pricing()
-    zone_ids = tuple(sorted(df["zone_id"].unique().tolist()))
-    pos, layout_note = load_layout(zone_ids)
-    alt = load_alternatives()
-    final = load_final_pricing()
-    sens = load_sensitivity()
-    resid, shap = load_model_info()
-
-    times = sorted(pd.to_datetime(df["time"].unique()))
-
-    with st.sidebar:
-        st.markdown("## ⚡ Charge Network")
-        mode = st.radio("Experience", ["EV Driver", "Network Operator"], key="mode")
-        st.divider()
-        t = st.select_slider(
-            "Time",
-            options=times,
-            value=times[max(0, len(times) - 24)],  # leaves a full 24h of forecast ahead
-            format_func=lambda x: x.strftime("%a %d %b · %H:%M"),
-            key="time",
-        )
-        st.caption(
-            f"Data: {times[0]:%d %b} – {times[-1]:%d %b %Y} · "
-            f"{df['zone_id'].nunique()} zones · hourly"
-        )
-
-    if mode == "EV Driver":
-        render_driver(df, t, pos, alt, layout_note)
-    else:
-        render_operator(df, t, pos, final, sens, resid, shap, layout_note)
-
-
-main()
+# ----------------------------- Footer ----------------------------------------
+st.divider()
+st.markdown(
+    "<div class='small-muted'>VoltIQ demo · Built with Streamlit and Plotly · "
+    "Predictions and scenario outputs are read from the supplied CSV files. "
+    "No real-time charger telemetry or geographic coordinates are included in this dataset.</div>",
+    unsafe_allow_html=True
+)
